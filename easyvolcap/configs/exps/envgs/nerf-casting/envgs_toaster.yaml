@@ -1,0 +1,16 @@
+configs:
+    - configs/base.yaml # default arguments for the whole codebase
+    - configs/models/envgs.yaml # envgs model configuration
+    - configs/datasets/nerf-casting/toaster.yaml # dataset usage configuration
+
+model_cfg:
+    sampler_cfg:
+        init_specular: 0.01
+    supervisor_cfg:
+        perc_loss_start_iter: 45000 # less iterations for faster training
+
+runner_cfg:
+    epochs: 120
+
+# prettier-ignore
+exp_name: {{fileBasenameNoExtension}}
