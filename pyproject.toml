@@ -91,10 +91,10 @@ dependencies = [
     "yapf>=0.43.0",
     "tinycudann",
     "simple-knn",
-    "pytorch3d",
-    "diff-surfel-tracing",
     "torchmcubes",
     "nvdiffrast",
+    "diff-surfel-tracing",
+    "pytorch3d",
 ]
 
 [tool.uv.sources]
@@ -144,5 +144,7 @@ explicit = true
 dev = [
     "accelerate>=1.12.0",
     "diffusers>=0.35.2",
+    "ipykernel>=7.1.0",
+    "jupyter>=1.1.1",
     "transformers>=4.57.3",
 ]

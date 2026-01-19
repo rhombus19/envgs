@@ -23,7 +23,7 @@ def detect_model_format(path, ext):
 def main():
     args = dotdict(
         data_root='data/bullet/final',
-        colmap='bkgd/colmap/colmap_sparse/0',
+        colmap='sparse/0',
         output='',
         sub='',
         scale=1.0,

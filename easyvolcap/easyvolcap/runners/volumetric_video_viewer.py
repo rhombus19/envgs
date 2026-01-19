@@ -65,7 +65,7 @@ class VolumetricVideoViewer:
                  visualize_paths: bool = True,  # might be laggy for larger datasets
                  visualize_axes: bool = False,  # will add an extra 0.xms
                  render_network: bool = True,
-                 render_meshes: bool = True,
+                 render_meshes: bool = False,
                  render_alpha: bool = True,
 
                  update_fps_time: float = 0.1,  # be less stressful
@@ -439,7 +439,7 @@ class VolumetricVideoViewer:
                 if changed: self.camera.fx = value
                 changed, value = imgui.slider_float('fy', self.camera.fx, 1.0, self.H * 3, format='%.6f')
                 if changed: self.camera.fy = value
-                self.camera.cx = imgui.slider_float('cx', self.camera.cx, 0.0, self.W * 1, format='%.6f')[1]
+                self.camlera.cx = imgui.slider_float('cx', self.camera.cx, 0.0, self.W * 1, format='%.6f')[1]
                 imgui.same_line()  # near bound
                 self.camera.cy = imgui.slider_float('cy', self.camera.cy, 0.0, self.H * 1, format='%.6f')[1]
                 imgui.pop_item_width()

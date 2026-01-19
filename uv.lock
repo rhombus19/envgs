@@ -978,6 +978,8 @@ dependencies = [
 dev = [
     { name = "accelerate" },
     { name = "diffusers" },
+    { name = "ipykernel" },
+    { name = "jupyter" },
     { name = "transformers" },
 ]
 
@@ -1079,6 +1081,8 @@ requires-dist = [
 dev = [
     { name = "accelerate", specifier = ">=1.12.0" },
     { name = "diffusers", specifier = ">=0.35.2" },
+    { name = "ipykernel", specifier = ">=7.1.0" },
+    { name = "jupyter", specifier = ">=1.1.1" },
     { name = "transformers", specifier = ">=4.57.3" },
 ]
 
