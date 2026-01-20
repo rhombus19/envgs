@@ -1135,7 +1135,13 @@ def render(
     # - for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk anliasing.
     surface_depth = render_depth_expect * (1 - pipe.depth_ratio) + render_depth_median * pipe.depth_ratio  # (1, H, W)
     # Assume the depth points form the 'surface' and generate psudo surface normal for regularizations
-    surface_normal = dpt2norm(viewpoint_camera, surface_depth)  # (H, W, 3)
+    surface_normal = dpt2norm(
+        viewpoint_camera.world_view_transform,
+        viewpoint_camera.image_width,
+        viewpoint_camera.image_height,
+        viewpoint_camera.FoVx,
+        viewpoint_camera.FoVy, 
+        surface_depth)  # (H, W, 3)
     surface_normal = surface_normal.permute(2, 0, 1)  # (3, H, W)
     # Remember to multiply with accum_alpha since render_normal is unnormalized
     surface_normal = surface_normal * (render_alpha).detach()  # (3, H, W)
@@ -1154,18 +1160,22 @@ def render(
 
     return output
 
-
+@torch.jit.script
 def dpt2xyz(
-    camera,
+    w2v: torch.Tensor,
+    W: float,
+    H: float,
+    fovx : float,
+    fovy : float,
     dpt: torch.Tensor,
     device: str = 'cuda'
 ):
     # Get the camera extrinsic matrix
-    c2w = (camera.world_view_transform.T).inverse()
+    c2w = (w2v.T).inverse()
     # Get the camera intrinsic matrix
-    W, H = camera.image_width, camera.image_height
-    fx = W / (2 * math.tan(camera.FoVx / 2.))
-    fy = H / (2 * math.tan(camera.FoVy / 2.))
+    # W, H = camera.image_width, camera.image_height
+    fx = W / (2 * math.tan(fovx / 2.))
+    fy = H / (2 * math.tan(fovy / 2.))
     K = torch.tensor([
         [fx, 0., W/2.],
         [0., fy, H/2.],
@@ -1187,15 +1197,26 @@ def dpt2xyz(
     return xyz
 
 
+@torch.jit.script
 def dpt2norm(
-    camera,
+    world_view_transform: torch.Tensor,
+    image_width: torch.Tensor,
+    image_height: torch.Tensor,
+    FoVx: float,
+    FoVy: float,
     dpt: torch.Tensor,
     device: str = 'cuda'
 ):
     # Convert the depth map to 3D points
     xyz = dpt2xyz(
-        camera, dpt, device
-    ).reshape(*dpt.shape[1:], 3)  # (H, W, 3)
+        world_view_transform,
+        image_width, 
+        image_height,
+        FoVx,
+        FoVy,
+        dpt, 
+        device
+    ).reshape(image_height.item(), image_width.item(), 3)  # (H, W, 3)  # changed from reshape(*dpt.shape[1:], 3)
 
     out = torch.zeros_like(xyz)  # (H, W, 3)
     # Compute the normal map from the depth map

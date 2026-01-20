@@ -14,12 +14,53 @@ import time
 
 torch.set_grad_enabled(False)
 
+TRACER = HardwareRendering().cuda()
+
 def fov2focal(fov, pixels):
     return pixels / (2 * np.tan(fov / 2))
 
 
 def focal2fov(focal, pixels):
     return 2 * np.arctan(pixels / (2 * focal))
+
+
+def rotation_matrix_xyz(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
+    # Right-handed rotations applied in X->Y->Z order (column-vector convention).
+    rx, ry, rz = np.deg2rad([rx_deg, ry_deg, rz_deg])
+    cx, sx = np.cos(rx), np.sin(rx)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cz, sz = np.cos(rz), np.sin(rz)
+
+    Rx = np.array([[1.0, 0.0, 0.0],
+                   [0.0, cx, -sx],
+                   [0.0, sx, cx]])
+    Ry = np.array([[cy, 0.0, sy],
+                   [0.0, 1.0, 0.0],
+                   [-sy, 0.0, cy]])
+    Rz = np.array([[cz, -sz, 0.0],
+                   [sz, cz, 0.0],
+                   [0.0, 0.0, 1.0]])
+
+    return Rz @ Ry @ Rx
+
+
+def apply_origin_transform(
+    c2w: np.ndarray,
+    rot_xyz_deg: tuple[float, float, float],
+    origin_offset: tuple[float, float, float],
+) -> np.ndarray:
+    if rot_xyz_deg is None and origin_offset is None:
+        return c2w
+    rx, ry, rz = rot_xyz_deg
+    ox, oy, oz = origin_offset
+    if rx == 0.0 and ry == 0.0 and rz == 0.0 and ox == 0.0 and oy == 0.0 and oz == 0.0:
+        return c2w
+    R = rotation_matrix_xyz(rx, ry, rz)
+    t = np.array([ox, oy, oz], dtype=c2w.dtype)
+    c2w = c2w.copy()
+    c2w[:3, :3] = R @ c2w[:3, :3]
+    c2w[:3, 3] = R @ c2w[:3, 3] + t
+    return c2w
 
 
 @torch.jit.script
@@ -160,10 +201,10 @@ def render_frame(pcd, env, cam):
     ref_o = ray_o + ray_d * dpt_map
 
     # Trace reflected rays through the env gaussians using OptiX
-    hw = HardwareRendering().cuda()
+    
     pipe_env = dotdict(convert_SHs_python=False, compute_cov3D_python=False, depth_ratio=0.0)
     env_bg = torch.zeros(3, device="cuda")
-    env_out = hw.render_gaussians(
+    env_out = TRACER.render_gaussians(
         cam, ref_o, ref_d, env, pipe_env, env_bg,
         max_trace_depth=0,
         specular_threshold=0.0,
@@ -179,8 +220,21 @@ def render_frame(pcd, env, cam):
 
 def main():
     pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
+    origin_gui = None
 
     def get_render_inputs(W, H, c2w, K):
+        if origin_gui is not None:
+            rot_xyz = (
+                float(origin_gui.rot_x.value),
+                float(origin_gui.rot_y.value),
+                float(origin_gui.rot_z.value),
+            )
+            origin_offset = (
+                float(origin_gui.off_x.value),
+                float(origin_gui.off_y.value),
+                float(origin_gui.off_z.value),
+            )
+            c2w = apply_origin_transform(c2w, rot_xyz, origin_offset)
         Rc = c2w[:3, :3]
         tc = c2w[:3, 3]
 
@@ -219,8 +273,17 @@ def main():
 
     # Initialize a viser server and our viewer.
     server = viser.ViserServer(verbose=True)
+    if hasattr(server, "gui"):
+        origin_gui = dotdict(
+            rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0),
+            rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0),
+            rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0),
+            off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0),
+            off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 1.0),
+            off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0),
+        )
     viewer = nerfview.Viewer(server=server, render_fn=render_fn, mode='rendering')
-    
+    viewer._rendering_tab_handles["viewer_res_slider"].value = 1024
     while True:
         time.sleep(1.0)
 

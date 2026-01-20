@@ -22,6 +22,7 @@ class HardwareRendering(nn.Module):
 
         # Create OptiX context
         self.tracer = SurfelTracer()
+        self.training = False
 
         # BVH indicator
         self.has_bvh = False
