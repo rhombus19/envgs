@@ -95,6 +95,9 @@ dependencies = [
     "nvdiffrast",
     "diff-surfel-tracing",
     "pytorch3d",
+    "nerfview>=0.1.3",
+    "splines>=0.3.3",
+    "jaxtyping>=0.3.5",
 ]
 
 [tool.uv.sources]
