@@ -280,6 +280,7 @@ class GaussianModel(nn.Module):
         init_roughness: float = 0.5,
         max_gs: int = 1e6,
         max_gs_threshold: float = 0.9,
+        selection_mask = None,
     ):
         super().__init__()
 
@@ -295,6 +296,7 @@ class GaussianModel(nn.Module):
         self.cpu_active_sh_degree = self.active_sh_degree.item()
         self.max_sh_degree = sh_degree
 
+        self.selection_mask = selection_mask
         # Set scene spatial scale
         self.spatial_scale = spatial_scale
 
@@ -361,33 +363,33 @@ class GaussianModel(nn.Module):
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        return self.scaling_activation(self._scaling[self.selection_mask] if self.selection_mask is not None else self._scaling)
 
     @property
     def get_rotation(self):
-        return self.rotation_activation(self._rotation)
+        return self.rotation_activation(self._rotation[self.selection_mask] if self.selection_mask is not None else self._rotation)
 
     @property
     def get_xyz(self):
-        return self._xyz
+        return self._xyz[self.selection_mask] if self.selection_mask is not None else self._xyz
 
     @property
     def get_features(self):
-        features_dc = self._features_dc
-        features_rest = self._features_rest
+        features_dc = self._features_dc[self.selection_mask] if self.selection_mask is not None else self._features_dc
+        features_rest = self._features_rest[self.selection_mask] if self.selection_mask is not None else self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
 
     @property
     def get_opacity(self):
-        return self.opacity_activation(self._opacity)
+        return self.opacity_activation(self._opacity[self.selection_mask] if self.selection_mask is not None else self._opacity)
 
     @property
     def get_specular(self):
-        return self.specular_activation(self._specular)
+        return self.specular_activation(self._specular[self.selection_mask] if self.selection_mask is not None else self._specular)
 
     @property
     def get_roughness(self):
-        return self.roughness_activation(self._roughness)
+        return self.roughness_activation(self._roughness[self.selection_mask] if self.selection_mask is not None else self._roughness)
 
     @property
     def get_max_sh_channels(self):
@@ -406,6 +408,14 @@ class GaussianModel(nn.Module):
             self.cpu_active_sh_degree = self.active_sh_degree.item()
             changed = True
         return changed
+
+    def set_aabb_mask(self, minX, maxX, minY, maxY, minZ, maxZ):
+        xyz = self._xyz
+        mins = torch.tensor([minX, minY, minZ], device=xyz.device, dtype=xyz.dtype)
+        maxs = torch.tensor([maxX, maxY, maxZ], device=xyz.device, dtype=xyz.dtype)
+
+        mask = (xyz >= mins).all(dim=1) & (xyz <= maxs).all(dim=1)
+        self.selection_mask = mask
 
     def create_from_pcd(
         self,
@@ -1130,9 +1140,9 @@ def render(
     render_depth_expect = (render_depth_expect / render_alpha)  # (1, H, W)
     render_depth_expect = torch.nan_to_num(render_depth_expect, 0, 0)  # (1, H, W)
 
-    # Psedo surface attributes, surface depth is either median or expected by setting depth_ratio to 1 or 0
+    # Pseudo surface attributes, surface depth is either median or expected by setting depth_ratio to 1 or 0
     # - for bounded scene, use median depth, i.e., depth_ratio = 1; 
-    # - for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk anliasing.
+    # - for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk aliasing.
     surface_depth = render_depth_expect * (1 - pipe.depth_ratio) + render_depth_median * pipe.depth_ratio  # (1, H, W)
     # Assume the depth points form the 'surface' and generate psudo surface normal for regularizations
     surface_normal = dpt2norm(

@@ -1,6 +1,8 @@
 # Copied from easyvolcap/easyvolcap/utils/gaussian2d_utils.py
 import numpy as np
 import math
+import os
+from contextlib import contextmanager
 import torch
 from easyvolcap.utils.base_utils import dotdict
 from easyvolcap.utils.gaussian2d_utils import GaussianModel
@@ -11,6 +13,34 @@ from easyvolcap.utils.ray_utils import get_rays
 import viser
 import nerfview
 import time
+
+# Profile python: sudo py-spy top --pid {PID}
+#
+#TODO for optimization:
+# 1. [x]Implement bounds for the pcd splat to render only the car itself
+# 2. Benchmark CPU/GPU time using Nsight
+# 3. Find out what  
+# 4. Look into making a custom renderer, reimplementing everything in Vulkan or CUDA completely. How does 2d surfel rasterization work right now?
+#
+# Speed up compilation in cloud:
+# 1. ensure ninja (apt-get install ninja-build)
+#
+# Normals are problematic
+
+# TODO:
+# 0. Train with all our datast using the sedan config
+# 1. Train with full resolution (lots of RAM needed)
+# 2. Adapt gaussian density???? To have more gaussians close up without that much sacrifices, maybe do LODs
+# 3. Better priors, add depth, mask priors??
+# 4. Check if maybe the trained surface normals are still the problem (Solution: better surface, for example SolidGS instead of 2dgs)
+
+#TODO GUI:
+# 1. [x] Find minimal code to load the model and render a frame
+# 2. [x] Stick it into nerfview, see what fps we get compared to native evc-gui
+# 3. [x] Setup up good camera
+# 4. Add UI elements for switching between render modes
+# 5. Render Train cameras overlay
+# 6. Enable switching between gt cameras 
 
 torch.set_grad_enabled(False)
 
@@ -25,7 +55,6 @@ def focal2fov(focal, pixels):
 
 
 def rotation_matrix_xyz(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
-    # Right-handed rotations applied in X->Y->Z order (column-vector convention).
     rx, ry, rz = np.deg2rad([rx_deg, ry_deg, rz_deg])
     cx, sx = np.cos(rx), np.sin(rx)
     cy, sy = np.cos(ry), np.sin(ry)
@@ -106,7 +135,7 @@ def getProjectionMatrix(fovx: torch.Tensor, fovy: torch.Tensor, znear: torch.Ten
     return P
 
 
-def make_camera_batch(H, W, K, R, T, n=0.1, f=100.0):
+def make_camera_batch(H, W, K, R, T, n=0.1, f=10.0):
     # Input camera params should be on CPU
     output = dotdict()
 
@@ -180,9 +209,20 @@ def normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     # channel last: normalization
     return x / (torch.norm(x, dim=-1, keepdim=True) + eps)
 
+from enum import Enum, auto
+class RenderPass(Enum):
+    COMBINED = auto()
+    DIFFUSE = auto()
+    SPECULAR = auto()
+    SPECULAR_MASK = auto()
+    NORMAL = auto()
+    SURF_DEPTH = auto()
+    SURF_NORMAL_FROM_DEPTH = auto()
+    DISTORTION = auto()
+    ALPHA = auto()
 
-def render_frame(pcd, env, cam):
-    # Diffuse pass (rasterizer) for pcd gaussians
+def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED):
+    # Diffuse pass (rasterizer) for base gaussians (pcd gaussians)
     pipe_dif = dotdict(convert_SHs_python=True, compute_cov3D_python=False, depth_ratio=0.0)
     bg = torch.zeros(3, device="cuda")
     dif = render(cam, pcd, pipe_dif, bg)
@@ -190,9 +230,13 @@ def render_frame(pcd, env, cam):
     norm_map = dif.rend_normal.permute(1, 2, 0)
     dpt_map = dif.surf_depth.permute(1, 2, 0)
     spec_map = dif.specular.permute(1, 2, 0)
+    surf_norm_map = dif.surf_normal.permute(1, 2, 0)
+    distortion_map = dif.rend_dist.permute(1, 2, 0)
+    alpha_map = dif.rend_alpha.permute(1, 2, 0)
+
 
     # Calculate ray directions per pixel
-    w,h = cam.image_width.item(), cam.image_height.item()
+    w, h = cam.image_width.item(), cam.image_height.item()
     ray_o, ray_d = get_rays(h, w, cam.K, cam.R, cam.T, correct_pix=True, z_depth=True)
 
     # Calculate reflected rays in screen space
@@ -201,7 +245,6 @@ def render_frame(pcd, env, cam):
     ref_o = ray_o + ray_d * dpt_map
 
     # Trace reflected rays through the env gaussians using OptiX
-    
     pipe_env = dotdict(convert_SHs_python=False, compute_cov3D_python=False, depth_ratio=0.0)
     env_bg = torch.zeros(3, device="cuda")
     env_out = TRACER.render_gaussians(
@@ -213,10 +256,32 @@ def render_frame(pcd, env, cam):
     )
     env_rgb = env_out.render.permute(1, 2, 0)
 
+    # extra logic for debugging
+    match renderpass:
+        case RenderPass.DIFFUSE:
+            return (dif_rgb.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.SPECULAR:
+            return (env_rgb.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.NORMAL:
+            return (norm_map.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.SURF_NORMAL_FROM_DEPTH:
+            return (surf_norm_map.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.SPECULAR_MASK:
+            return (spec_map.expand(*spec_map.shape[:2], 3).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.SURF_DEPTH:
+            return (dpt_map.expand(*dpt_map.shape[:2], 3).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.DISTORTION:
+            return (distortion_map.expand(*distortion_map.shape[:2], 3).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case RenderPass.ALPHA:
+            return (alpha_map.expand(*alpha_map.shape[:2], 3).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        case _:
+            pass
+
     # Blend
     rgb = (1.0 - spec_map) * dif_rgb + spec_map * env_rgb
     rgb8 = (rgb.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
     return rgb8
+
 
 def main():
     pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
@@ -239,7 +304,7 @@ def main():
         tc = c2w[:3, 3]
 
         R = Rc.T
-        T = (-R @ tc).reshape(3, 1)  # 3x1 (use .reshape(3,) if you need 3,)
+        T = (-R @ tc).reshape(3, 1)
 
         cam_dict = make_camera_batch(
             torch.tensor(H, dtype=torch.float32), 
@@ -251,6 +316,25 @@ def main():
         
         return cam_dict
 
+    # Initialize a viser server and our viewer.
+    server = viser.ViserServer(verbose=True)
+    
+
+    with server.gui.add_folder("Camera Origin"):
+        origin_gui = dotdict(
+            rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0),
+            rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0),
+            rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0),
+            off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0),
+            off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 1.0),
+            off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0),
+        )
+    with server.gui.add_folder("Splat Controls"):
+        aabb_x = server.gui.add_multi_slider("AABB X", -10, 10, 0.1, (-2.5, 2.5))
+        aabb_y = server.gui.add_multi_slider("AABB Y", -10, 10, 0.1, (-2.5, 2.5))
+        aabb_z = server.gui.add_multi_slider("AABB Z", -10, 10, 0.1, (-2.5, 2.5))
+        render_pass = server.gui.add_dropdown("Render Pass", [render_pass.name for render_pass in RenderPass], initial_value=RenderPass.COMBINED.name)
+    
     def render_fn(
         camera_state, render_tab_state
     ) -> np.ndarray:
@@ -267,23 +351,40 @@ def main():
         K = camera_state.get_K([width, height])
 
         cam = get_render_inputs(width, height, c2w, K)
-        img = render_frame(pcd, env, cam)
-        # img = np.zeros((width,height,3), dtype=np.uint8)
+        img = render_frame(pcd, env, cam, RenderPass[render_pass.value])
         return img
 
-    # Initialize a viser server and our viewer.
-    server = viser.ViserServer(verbose=True)
-    if hasattr(server, "gui"):
-        origin_gui = dotdict(
-            rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0),
-            rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0),
-            rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0),
-            off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0),
-            off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 1.0),
-            off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0),
-        )
     viewer = nerfview.Viewer(server=server, render_fn=render_fn, mode='rendering')
+    def _apply_aabb(_=None):
+        xmin, xmax = aabb_x.value
+        ymin, ymax = aabb_y.value
+        zmin, zmax = aabb_z.value
+        
+        with viewer.lock:
+            pcd.set_aabb_mask(
+                min(-0.5, xmin),
+                max(0.5, xmax), 
+                min(-0.5, ymin), 
+                max(0.5, ymax), 
+                min(-0.5, zmin), 
+                max(0.5, zmax))
+        
+        viewer.rerender(_)
+
+    aabb_x.on_update(_apply_aabb)
+    aabb_y.on_update(_apply_aabb)
+    aabb_z.on_update(_apply_aabb)
+
+    render_pass.on_update(lambda _: viewer.rerender(_))
+        
+    
+    # NerfView GUI overrides
     viewer._rendering_tab_handles["viewer_res_slider"].value = 1024
+    viewer._rendering_folder.expand_by_default = False
+    
+    # Apply AABB from the start
+    _apply_aabb()
+
     while True:
         time.sleep(1.0)
 
