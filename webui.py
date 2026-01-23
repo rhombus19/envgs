@@ -18,21 +18,28 @@ import time
 #
 #TODO for optimization:
 # 1. [x]Implement bounds for the pcd splat to render only the car itself
-# 2. Benchmark CPU/GPU time using Nsight
-# 3. Find out what  
+# 2. Trace rays only where the specular mask is above a threshold
+# 3. Benchmark CPU/GPU time using Nsight
 # 4. Look into making a custom renderer, reimplementing everything in Vulkan or CUDA completely. How does 2d surfel rasterization work right now?
 #
-# Speed up compilation in cloud:
-# 1. ensure ninja (apt-get install ninja-build)
+# Speed up compilation in cloud: ensure ninja (apt-get install ninja-build)
 #
+# IDEAS: (not verified)
 # Normals are problematic
-
+# Understand the training process and training metrics better
+# Disable SH at train time or penalize SH values. The reflection_mask is very noisy and patchy, but the surface isn't.
+# Maybe SH deal with reflections partially and make it difficult for gradients to flow to the env gaussian and the reflection_mask
+# Try 3 specular channels?
+# 
+#
 # TODO:
-# 0. Train with all our datast using the sedan config
-# 1. Train with full resolution (lots of RAM needed)
-# 2. Adapt gaussian density???? To have more gaussians close up without that much sacrifices, maybe do LODs
-# 3. Better priors, add depth, mask priors??
-# 4. Check if maybe the trained surface normals are still the problem (Solution: better surface, for example SolidGS instead of 2dgs)
+# 1. Train with all our datasets using the sedan config
+# 2. Better priors, add depth, mask priors??
+# 3. Train with full resolution (lots of RAM needed)
+# 4. Adapt gaussian density???? To have more gaussians close up without that much sacrifices, maybe do LODs
+# 5. Check if maybe the trained surface normals are still the problem (Solution: better surface, for example SolidGS instead of 2dgs)
+# 6. [x] Dellensegel instead of ENV gs
+# 7. Change initial specular value.
 
 #TODO GUI:
 # 1. [x] Find minimal code to load the model and render a frame
@@ -71,25 +78,6 @@ def rotation_matrix_xyz(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarr
                    [0.0, 0.0, 1.0]])
 
     return Rz @ Ry @ Rx
-
-
-def apply_origin_transform(
-    c2w: np.ndarray,
-    rot_xyz_deg: tuple[float, float, float],
-    origin_offset: tuple[float, float, float],
-) -> np.ndarray:
-    if rot_xyz_deg is None and origin_offset is None:
-        return c2w
-    rx, ry, rz = rot_xyz_deg
-    ox, oy, oz = origin_offset
-    if rx == 0.0 and ry == 0.0 and rz == 0.0 and ox == 0.0 and oy == 0.0 and oz == 0.0:
-        return c2w
-    R = rotation_matrix_xyz(rx, ry, rz)
-    t = np.array([ox, oy, oz], dtype=c2w.dtype)
-    c2w = c2w.copy()
-    c2w[:3, :3] = R @ c2w[:3, :3]
-    c2w[:3, 3] = R @ c2w[:3, 3] + t
-    return c2w
 
 
 @torch.jit.script
@@ -134,6 +122,46 @@ def getProjectionMatrix(fovx: torch.Tensor, fovy: torch.Tensor, znear: torch.Ten
 
     return P
 
+def apply_origin_transform(
+    c2w: np.ndarray,
+    rot_xyz_deg: tuple[float, float, float],
+    origin_offset: tuple[float, float, float],
+) -> np.ndarray:
+    
+    if rot_xyz_deg is None and origin_offset is None:
+        return c2w
+    
+    rx, ry, rz = rot_xyz_deg
+    ox, oy, oz = origin_offset
+
+    if rx == 0.0 and ry == 0.0 and rz == 0.0 and ox == 0.0 and oy == 0.0 and oz == 0.0:
+        return c2w
+    
+    R = rotation_matrix_xyz(rx, ry, rz)
+    t = np.array([ox, oy, oz], dtype=c2w.dtype)
+
+    c2w = c2w.copy()
+    c2w[:3, :3] = R @ c2w[:3, :3]
+    c2w[:3, 3] = R @ c2w[:3, 3] + t
+
+    return c2w
+
+def get_render_inputs(W, H, c2w, K):
+    Rc = c2w[:3, :3]
+    tc = c2w[:3, 3]
+
+    R = Rc.T  #w2c
+    T = (-R @ tc).reshape(3, 1)  #w2c
+
+    cam_dict = make_camera_batch(
+        torch.tensor(H, dtype=torch.float32), 
+        torch.tensor(W, dtype=torch.float32), 
+        torch.tensor(K, dtype=torch.float32), 
+        torch.tensor(R, dtype=torch.float32), 
+        torch.tensor(T, dtype=torch.float32), 
+    )
+    
+    return cam_dict
 
 def make_camera_batch(H, W, K, R, T, n=0.1, f=10.0):
     # Input camera params should be on CPU
@@ -174,7 +202,7 @@ def make_camera_batch(H, W, K, R, T, n=0.1, f=10.0):
 def load_splats(ckpt_path):
     state = torch.load(ckpt_path, map_location="cpu")["model"]
     
-    # Dummy GaussianModel
+    # initialize GaussianModel
     pcd = GaussianModel(
             xyz=torch.empty(1, 3, device="cuda"),
             colors=None,
@@ -184,7 +212,7 @@ def load_splats(ckpt_path):
             xyz_lr_scheduler=None,  # key fix: avoid lr_init/lr_final access
         )
 
-    # Dummy GaussianModel
+    # initialize GaussianModel
     env = GaussianModel(
             xyz=torch.empty(1, 3, device="cuda"),
             colors=None,
@@ -198,6 +226,7 @@ def load_splats(ckpt_path):
     loaded_params_pcd = {k[len("sampler.pcd."):]: v for k, v in state.items() if k.startswith("sampler.pcd.")}
     loaded_params_env = {k[len("sampler.env."):]: v for k, v in state.items() if k.startswith("sampler.env.")}
 
+    # Dump trained parameters to the GaussianModel instances
     pcd.load_state_dict(loaded_params_pcd, strict=False)
     env.load_state_dict(loaded_params_env, strict=False)
 
@@ -221,7 +250,7 @@ class RenderPass(Enum):
     DISTORTION = auto()
     ALPHA = auto()
 
-def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED):
+def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED, render_stripped_env_only=False, stripes_freq=100):
     # Diffuse pass (rasterizer) for base gaussians (pcd gaussians)
     pipe_dif = dotdict(convert_SHs_python=True, compute_cov3D_python=False, depth_ratio=0.0)
     bg = torch.zeros(3, device="cuda")
@@ -243,18 +272,38 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED):
     norm = normalize(norm_map)
     ref_d = ray_d - 2 * (ray_d * norm).sum(-1, keepdim=True) * norm
     ref_o = ray_o + ray_d * dpt_map
+    
+    if not render_stripped_env_only:
+        # Trace reflected rays through the env gaussians using OptiX
+        pipe_env = dotdict(convert_SHs_python=False, compute_cov3D_python=False, depth_ratio=0.0)
+        env_bg = torch.zeros(3, device="cuda")
+        env_out = TRACER.render_gaussians(
+            cam, ref_o, ref_d, env, pipe_env, env_bg,
+            max_trace_depth=0,
+            specular_threshold=0.0,
+            start_from_first=False,
+            batch=cam,
+        )
+        env_rgb = env_out.render.permute(1, 2, 0)
 
-    # Trace reflected rays through the env gaussians using OptiX
-    pipe_env = dotdict(convert_SHs_python=False, compute_cov3D_python=False, depth_ratio=0.0)
-    env_bg = torch.zeros(3, device="cuda")
-    env_out = TRACER.render_gaussians(
-        cam, ref_o, ref_d, env, pipe_env, env_bg,
-        max_trace_depth=0,
-        specular_threshold=0.0,
-        start_from_first=False,
-        batch=cam,
-    )
-    env_rgb = env_out.render.permute(1, 2, 0)
+    else:
+        #TODO: Check math. Code written by ChatGPT
+        x, y, z = ref_d[...,0], ref_d[...,1], ref_d[...,2]
+        
+        lon = torch.atan2(x, z)              # [-pi, pi], seam at pi/-pi
+        s = 0.5 + 0.5 * torch.sin(stripes_freq * lon)   # N = stripe frequency around 360
+
+        # sharpen (smooth binary)
+        sharp = 10.0
+        s = s**sharp / (s**sharp + (1-s)**sharp + 1e-8)
+
+        # Other stripes. TODO: Check what fits us best
+        # a = torch.tensor([1.0, 0.0, 0.0], device=ref_d.device)  # choose stripe axis
+        # t = (ref_d * a).sum(dim=-1).clamp(-1, 1)                # [-1, 1]
+        # s = 0.5 + 0.5 * torch.sin(stripes_freq * t)                        # K controls density
+
+        env_rgb = torch.Tensor([0,0,0]).cuda()*(1-s)[...,None] + torch.Tensor([1,1,1]).cuda()*s[...,None]
+
 
     # extra logic for debugging
     match renderpass:
@@ -263,9 +312,9 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED):
         case RenderPass.SPECULAR:
             return (env_rgb.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         case RenderPass.NORMAL:
-            return (norm_map.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+            return (((norm_map + 1) * 0.5).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         case RenderPass.SURF_NORMAL_FROM_DEPTH:
-            return (surf_norm_map.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+            return (((surf_norm_map + 1) * 0.5).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         case RenderPass.SPECULAR_MASK:
             return (spec_map.expand(*spec_map.shape[:2], 3).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         case RenderPass.SURF_DEPTH:
@@ -282,64 +331,39 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED):
     rgb8 = (rgb.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
     return rgb8
 
-
 def main():
     pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
-    origin_gui = None
-
-    def get_render_inputs(W, H, c2w, K):
-        if origin_gui is not None:
-            rot_xyz = (
-                float(origin_gui.rot_x.value),
-                float(origin_gui.rot_y.value),
-                float(origin_gui.rot_z.value),
-            )
-            origin_offset = (
-                float(origin_gui.off_x.value),
-                float(origin_gui.off_y.value),
-                float(origin_gui.off_z.value),
-            )
-            c2w = apply_origin_transform(c2w, rot_xyz, origin_offset)
-        Rc = c2w[:3, :3]
-        tc = c2w[:3, 3]
-
-        R = Rc.T
-        T = (-R @ tc).reshape(3, 1)
-
-        cam_dict = make_camera_batch(
-            torch.tensor(H, dtype=torch.float32), 
-            torch.tensor(W, dtype=torch.float32), 
-            torch.tensor(K, dtype=torch.float32), 
-            torch.tensor(R, dtype=torch.float32), 
-            torch.tensor(T, dtype=torch.float32), 
-        )
-        
-        return cam_dict
 
     # Initialize a viser server and our viewer.
     server = viser.ViserServer(verbose=True)
-    
 
+    # GUI
     with server.gui.add_folder("Camera Origin"):
-        origin_gui = dotdict(
-            rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0),
-            rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0),
-            rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0),
-            off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0),
-            off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 1.0),
-            off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0),
-        )
+        rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0)
+        rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0)
+        rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0)
+        off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0)
+        off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 1.0)
+        off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0)
+    
     with server.gui.add_folder("Splat Controls"):
         aabb_x = server.gui.add_multi_slider("AABB X", -10, 10, 0.1, (-2.5, 2.5))
         aabb_y = server.gui.add_multi_slider("AABB Y", -10, 10, 0.1, (-2.5, 2.5))
         aabb_z = server.gui.add_multi_slider("AABB Z", -10, 10, 0.1, (-2.5, 2.5))
         render_pass = server.gui.add_dropdown("Render Pass", [render_pass.name for render_pass in RenderPass], initial_value=RenderPass.COMBINED.name)
-    
+        sh_toggle = server.gui.add_checkbox("Disable SH", initial_value=False)
+        stripped_env = server.gui.add_checkbox("Enable stripes", initial_value=False)
+        stripped_env_freq = server.gui.add_slider("Stripe frequency", min=0, max=500, step=1, initial_value=100)
+
+    #TODO 22.01.2026
+    # 1. [x] Disable SH toggle in GUI
+    # 2. [x] Camera Origin Control clenup
+    # 3. [x] Dellensegel
+    # 4. [ ] Generate normal maps using metric3D (compare with StableNormal?)
+
     def render_fn(
         camera_state, render_tab_state
     ) -> np.ndarray:
-        # Parse camera state for camera-to-world matrix (c2w) and intrinsic (K) as
-        # float64 numpy arrays.
         if render_tab_state.preview_render:
             width = render_tab_state.render_width
             height = render_tab_state.render_height
@@ -350,11 +374,19 @@ def main():
         c2w = camera_state.c2w
         K = camera_state.get_K([width, height])
 
+        # Camera Origin Transform
+        rot_xyz = (rot_x.value, rot_y.value, rot_z.value)
+        origin_offset = (off_x.value, off_y.value, off_z.value)
+
+        c2w = apply_origin_transform(c2w, rot_xyz, origin_offset)
+
         cam = get_render_inputs(width, height, c2w, K)
-        img = render_frame(pcd, env, cam, RenderPass[render_pass.value])
+        img = render_frame(pcd, env, cam, RenderPass[render_pass.value], render_stripped_env_only=stripped_env.value, stripes_freq=stripped_env_freq.value)
         return img
 
     viewer = nerfview.Viewer(server=server, render_fn=render_fn, mode='rendering')
+
+    # GUI LOGIC
     def _apply_aabb(_=None):
         xmin, xmax = aabb_x.value
         ymin, ymax = aabb_y.value
@@ -370,13 +402,20 @@ def main():
                 max(0.5, zmax))
         
         viewer.rerender(_)
+    
+    def toggle_sh_effects(_=None):
+        with viewer.lock:
+            pcd.toggle_sh()
+        viewer.rerender(_)
 
     aabb_x.on_update(_apply_aabb)
     aabb_y.on_update(_apply_aabb)
     aabb_z.on_update(_apply_aabb)
 
     render_pass.on_update(lambda _: viewer.rerender(_))
-        
+    stripped_env.on_update(lambda _: viewer.rerender(_))
+    stripped_env_freq.on_update(lambda _: viewer.rerender(_))
+    sh_toggle.on_update(toggle_sh_effects)
     
     # NerfView GUI overrides
     viewer._rendering_tab_handles["viewer_res_slider"].value = 1024

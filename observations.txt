@@ -1,0 +1,27 @@
+Key Observations
+
+Your assumption “SH and specular are trained together before raytracing” isn’t quite true: before render_reflection_start_iter, the specular map never affects rgb_map (it’s only used for visualization). So _specular is effectively unconstrained until the reflection pass turns on. See envgs_sampler.py (lines 534-563) and gaussian2d_sampler.py (lines 367-385).
+The per‑Gaussian specular is a view‑invariant scalar splatted like color (alpha‑weighted). That’s physically mismatched: specular intensity should be strongly view‑dependent (Fresnel), so a constant mask will inevitably “fight” to explain moving highlights and becomes noisy/patchy. See gaussian2d_utils.py (lines 395-488) and forward.cu (lines 376-432).
+When you enable raytracing, you now have two mechanisms for reflections: SH view‑dependence in the base Gaussians and the explicit reflection pass. Without constraints, they compete, and the specular map becomes a slack variable. Mixing happens here: envgs_sampler.py (lines 466-476).
+Why it’s patchy (first‑principles view)
+
+The specular map is a linear blend weight learned per Gaussian, so it can “explain away” errors in either diffuse SH or reflection env. This is ill‑posed and encourages high‑frequency noise.
+No explicit smoothness or material prior exists for specular. Normals constrain geometry, not material; so a correct surface doesn’t force a clean spec map.
+Car scenes are multi‑layered materials (clearcoat + base + glass). A single scalar specular weight per Gaussian cannot model this, especially with transparency in windows.
+High‑Leverage Improvements
+
+Make specular view‑dependent using Fresnel: spec = sigmoid(s) * Fresnel(dot(n,v), F0) instead of a pure scalar. You already have normals; this aligns with physics and will reduce patchiness and view‑inconsistent blobs.
+Start raytracing earlier, and ramp its weight gradually. Today _specular is unconstrained until render_reflection_start_iter, so it starts from noise. See envgs_sampler.py (lines 536-563).
+Freeze or down‑weight SH once reflection starts. SH can memorize reflections early, then fight the reflection pass later. Consider fixing SH degree or disabling features_rest after reflection start.
+Add a specular smoothness prior: either image‑space TV on spec_map or 3D KNN smoothness on _specular (weighted by distance + normal similarity). This is the single most direct fix for patchiness.
+Avoid specular resets once reflections are active. reset_specular is called after opacity reset and can re‑inject noise. See envgs_sampler.py (lines 292-302).
+For cars specifically, add material structure: separate Gaussians or a mask for glass/clearcoat. Otherwise the specular map tries to emulate transparency and layered effects and becomes unstable.
+If you want accurate reflections more than low‑frequency SH
+
+Disable SH view‑dependence for the base model once reflections start (keep only DC color), and let the raytraced env drive reflections. That removes a major source of entanglement.
+Increase environment capacity (more env Gaussians or higher SH) so specular doesn’t compensate for missing high‑frequency environment content.
+If you want, I can propose concrete changes (config + code) to:
+
+add Fresnel‑based specular,
+add a smoothness prior on spec_map, and
+adjust the training schedule so specular isn’t unconstrained before reflection.

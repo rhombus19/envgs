@@ -296,7 +296,10 @@ class GaussianModel(nn.Module):
         self.cpu_active_sh_degree = self.active_sh_degree.item()
         self.max_sh_degree = sh_degree
 
+        # Masking
         self.selection_mask = selection_mask
+        self.render_sh = True
+
         # Set scene spatial scale
         self.spatial_scale = spatial_scale
 
@@ -377,6 +380,11 @@ class GaussianModel(nn.Module):
     def get_features(self):
         features_dc = self._features_dc[self.selection_mask] if self.selection_mask is not None else self._features_dc
         features_rest = self._features_rest[self.selection_mask] if self.selection_mask is not None else self._features_rest
+        
+        # Disable view-dependent Spherical Harmonics effect -> get single rgb color (not ideal, as the sh coefficients were trained together, so single rgb is noisy)
+        if not self.render_sh:
+            features_rest = torch.zeros_like(features_rest)
+        
         return torch.cat((features_dc, features_rest), dim=1)
 
     @property
@@ -394,6 +402,9 @@ class GaussianModel(nn.Module):
     @property
     def get_max_sh_channels(self):
         return (self.max_sh_degree + 1)**2
+    
+    def toggle_sh(self):
+        self.render_sh = not self.render_sh
 
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self.get_rotation)
