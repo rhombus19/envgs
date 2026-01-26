@@ -50,10 +50,11 @@ import time
 
 
 #TODO 26.01.2026
+# - Get Metric3D VIT giant to work
+# - Test training in AWS
 # - Create a list of experiments to run (ex. sedan with metric3d, our datasets with sedan config, ...)
 # - Run experiments
 # - Print out and read envgs, materialrefgs, 2dgs papers
-# - Test training in AWS
 torch.set_grad_enabled(False)
 
 TRACER = HardwareRendering().cuda()

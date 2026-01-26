@@ -34,6 +34,7 @@ The other relevant parts are located in `envgs/easyvolcap/easyvolcap/utils/gauss
 
 
 This is what the built model looks like:
+```python
 >>> self.model
 VolumetricVideoModel(
   (camera): NoopCamera()
@@ -53,8 +54,10 @@ VolumetricVideoModel(
     )
   )
 )
+```
 
 This is what a test batch can look like:
+```python
 >>> batch
     {
     'H': tensor([768], device='cuda:0', dtype=torch.int32),
@@ -117,3 +120,4 @@ This is what a test batch can look like:
     'iter': 60000,
     'frac': 1.0
 }
+```
