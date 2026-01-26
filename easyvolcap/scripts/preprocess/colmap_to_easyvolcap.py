@@ -113,6 +113,11 @@ def main(args):
         os.makedirs(f'{output}/sparse', exist_ok=True)
         os.system(f'cp -r {colmap} {output}/sparse')
 
+    # data_root is the scene
+    if not args.multi_scene:
+        process_scene(args.data_root)
+        return
+    
     # Find all scenes
     if len(args.scenes):
         scenes = [
@@ -126,6 +131,7 @@ def main(args):
             for f in os.listdir(args.data_root)
             if os.path.isdir(os.path.join(args.data_root, f))
         ]
+    
 
     # Process each scene
     parallel_execution(scenes, action=process_scene, sequential=True)
@@ -135,6 +141,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, default='data/datasets/original/refnerf/ref_real')
     parser.add_argument('--scenes', nargs='+', default=[])
+    parser.add_argument('--multi_scene', action='store_true')
     parser.add_argument('--colmap', type=str, default='sparse/0')
     parser.add_argument('--src_images_dir', type=str, default='images')
     parser.add_argument('--tar_images_dir', type=str, default='images')

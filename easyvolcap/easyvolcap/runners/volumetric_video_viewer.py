@@ -326,6 +326,7 @@ class VolumetricVideoViewer:
         #     data_time = timer.record()
         #     ctog_time = timer.record()
 
+        # import code; code.interact(local=locals())
         # Forward pass
         try:
             # output = dotdict()

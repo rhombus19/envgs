@@ -98,6 +98,7 @@ dependencies = [
     "nerfview>=0.1.3",
     "splines>=0.3.3",
     "jaxtyping>=0.3.5",
+    "hf>=1.1.0",
 ]
 
 [tool.uv.sources]

@@ -1,4 +1,3 @@
-# Copied from easyvolcap/easyvolcap/utils/gaussian2d_utils.py
 import numpy as np
 import math
 import os
@@ -45,10 +44,16 @@ import time
 # 1. [x] Find minimal code to load the model and render a frame
 # 2. [x] Stick it into nerfview, see what fps we get compared to native evc-gui
 # 3. [x] Setup up good camera
-# 4. Add UI elements for switching between render modes
+# 4. [x] Add UI elements for switching between render modes
 # 5. Render Train cameras overlay
-# 6. Enable switching between gt cameras 
+# 6. Enable switching between gt cameras/views
 
+
+#TODO 26.01.2026
+# - Create a list of experiments to run (ex. sedan with metric3d, our datasets with sedan config, ...)
+# - Run experiments
+# - Print out and read envgs, materialrefgs, 2dgs papers
+# - Test training in AWS
 torch.set_grad_enabled(False)
 
 TRACER = HardwareRendering().cuda()
@@ -354,12 +359,6 @@ def main():
         sh_toggle = server.gui.add_checkbox("Disable SH", initial_value=False)
         stripped_env = server.gui.add_checkbox("Enable stripes", initial_value=False)
         stripped_env_freq = server.gui.add_slider("Stripe frequency", min=0, max=500, step=1, initial_value=100)
-
-    #TODO 22.01.2026
-    # 1. [x] Disable SH toggle in GUI
-    # 2. [x] Camera Origin Control clenup
-    # 3. [x] Dellensegel
-    # 4. [ ] Generate normal maps using metric3D (compare with StableNormal?)
 
     def render_fn(
         camera_state, render_tab_state
