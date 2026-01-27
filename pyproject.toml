@@ -135,10 +135,6 @@ nvdiffrast = ["torch==2.3.1"]
 chumpy = ["pip"]
 torch-scatter = ["torch==2.3.1"]
 
-
-
-
-
 [[tool.uv.index]]
 name = "cu118"
 url = "https://download.pytorch.org/whl/cu118"

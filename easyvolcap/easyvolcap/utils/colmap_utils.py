@@ -395,6 +395,19 @@ def read_points3D_binary(path_to_model_file):
                 point2D_idxs=point2D_idxs)
     return points3D
 
+def write_points3D_ply(points: dict, path: str):
+    n = len(points)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        for point in list(points.values()):
+            (x, y, z) = point.xyz
+            (r, g, b) = point.rgb
+            f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)}\n")
 
 def read_points3D_text_custom(path):
     """

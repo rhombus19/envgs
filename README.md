@@ -25,6 +25,27 @@ Convert from colmap to easyvolcap
 ```bash
 uv run scripts/preprocess/colmap_to_easyvolcap.py --data_root data/datasets/original/ref_real --output data/datasets/
 ```
+NOTE: This script symlinks images from the original folder. To archive the dataset, use `tar -czhf dataset.tar.gz dataset_dir/`
+
+An EnvGS dataset requires a couple of things:
+- initial pointcloud for the base gaussian: e.g. colmap's points3D.ply
+- initial env gaussian: e.g. random point cloud within certain bounds
+- intri.yaml, extri.yaml: can be obtained from a colmap model using colmap_to_easyvolcap.py
+- spatial_scale: 5.231606340408326
+
+model_cfg:
+    sampler_cfg:
+        # Base Gaussian
+        densify_until_iter: 30000
+        normal_prop_until_iter: 24000
+        color_sabotage_until_iter: 24000
+        sh_start_iter: 10000 # let the base Gaussian be view-independent first
+        # Environment Gaussian
+        env_densify_until_iter: 30000
+        init_specular: 0.1 # large initial specular
+    supervisor_cfg:
+        perc_loss_weight: 0.1
+
 
 # Training
 

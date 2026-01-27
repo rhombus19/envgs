@@ -7,7 +7,7 @@ import numpy as np
 from easyvolcap.utils.console_utils import *
 from easyvolcap.utils.easy_utils import write_camera
 from easyvolcap.utils.parallel_utils import parallel_execution
-from easyvolcap.utils.colmap_utils import qvec2rotmat, read_model, read_cameras_text, read_images_text, detect_model_format, read_cameras_binary, read_images_binary
+from easyvolcap.utils.colmap_utils import qvec2rotmat, read_model, read_cameras_text, read_images_text, detect_model_format, read_cameras_binary, read_images_binary, read_points3D_text, write_points3D_ply, read_points3D_binary
 
 
 def detect_model_format(path, ext):
@@ -44,12 +44,17 @@ def main(args):
         if ext == '.bin':
             cameras = read_cameras_binary(join(colmap, "cameras" + ext))
             images = read_images_binary(join(colmap, "images" + ext))
+            points3D = read_points3D_binary(join(colmap, "points3D" + ext))
         else:
             cameras = read_cameras_text(join(colmap, "cameras" + ext))
             images = read_images_text(join(colmap, "images" + ext))
+            points3D = read_points3D_text(join(colmap, "points3D" + ext))
+
         log(f"number of cameras: {len(cameras)}")
         log(f"number of images: {len(images)}")
-        # log(f"number of points3D: {len(points3D)}")
+        log(f"number of points3D: {len(points3D)}")
+
+        write_points3D_ply(points3D, join(colmap, "points3D" + ".ply"))
 
         intrinsics = {}
         for key in cameras.keys():

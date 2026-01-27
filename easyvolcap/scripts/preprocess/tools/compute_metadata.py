@@ -40,6 +40,42 @@ def load_points(points_file: str = None):
     return xyz
 
 
+def detect_camera_outliers(cameras, camera_names, mad_mult=8.0, ratio=10.0, min_inliers=1):
+    if len(camera_names) <= 1:
+        return [], None
+
+    Rs = np.stack([cameras[name]['R'] for name in camera_names], axis=0)  # (N, 3, 3)
+    Ts = np.stack([cameras[name]['T'] for name in camera_names], axis=0)  # (N, 3, 1)
+    Cs = -Rs.mT @ Ts  # (N, 3, 1)
+    centers = Cs.reshape(len(camera_names), 3)
+
+    median_center = np.median(centers, axis=0)
+    dists = np.linalg.norm(centers - median_center[None], axis=1)
+    med_dist = np.median(dists)
+    mad_dist = np.median(np.abs(dists - med_dist))
+
+    if mad_dist > 0:
+        threshold = med_dist + mad_mult * mad_dist
+        method = f"median+{mad_mult}*MAD"
+    else:
+        nonzero = dists[dists > 0]
+        base = np.median(nonzero) if nonzero.size > 0 else med_dist
+        threshold = base * ratio
+        method = f"median_nonzero*{ratio}"
+
+    outlier_mask = dists > threshold
+    outlier_indices = np.where(outlier_mask)[0].tolist()
+    if len(camera_names) - len(outlier_indices) < min_inliers:
+        log(yellow("Outlier filter would remove too many cameras; skipping filter."))
+        return [], None
+
+    if outlier_indices:
+        outlier_names = [camera_names[i] for i in outlier_indices]
+        log(f'{yellow("Filtering outlier cameras")}: {cyan(outlier_names)}')
+        log(f'{yellow("Outlier filter method")}: {cyan(method)}, {yellow("threshold")}: {cyan(threshold)}')
+    return outlier_indices, dists
+
+
 @catch_throw
 def main(args):
     # Define the per-scene processing function
@@ -53,13 +89,24 @@ def main(args):
         # Load all cameras
         cameras = read_camera(data_root)
         camera_names = sorted(cameras.keys())  # sort the camera names
+        outlier_indices = []
+        if not args.disable_camera_outlier_filter:
+            outlier_indices, _ = detect_camera_outliers(
+                cameras,
+                camera_names,
+                mad_mult=args.center_outlier_mad_mult,
+                ratio=args.center_outlier_ratio,
+                min_inliers=args.center_outlier_min_inliers,
+            )
+        outlier_index_set = set(outlier_indices)
+        valid_indices = [i for i in range(len(camera_names)) if i not in outlier_index_set]
 
         # Split the cameras into two groups if `args.eval` is True
         if args.eval:
-            view_sample = [i for i in range(len(camera_names)) if i % args.skip != 0]
-            val_view_sample = [i for i in range(len(camera_names)) if i % args.skip == 0]
+            view_sample = [i for i in valid_indices if i % args.skip != 0]
+            val_view_sample = [i for i in valid_indices if i % args.skip == 0]
         else:
-            view_sample = [i for i in range(len(camera_names))]
+            view_sample = valid_indices
             val_view_sample = []
         log(f'dataloader_cfg.dataset_cfg.view_sample: {view_sample}')
         log(f'val_dataloader_cfg.dataset_cfg.view_sample: {val_view_sample}')
@@ -69,6 +116,7 @@ def main(args):
         Ts = np.stack([cameras[camera_names[i]]['T'] for i in view_sample], axis=0)  # (N, 3, 1)
         Cs = -Rs.mT @ Ts  # (N, 3, 1)
         center = np.mean(Cs, axis=0)  # (3, 1)
+
         radius = np.linalg.norm(Cs - center[None], axis=1).max()  # scalar
         radius = radius * 1.1  # follow the original 3DGS
         log(f"model_cfg.sampler_cfg.spatial_scale: {radius}")
@@ -101,8 +149,12 @@ if __name__ == "__main__":
     parser.add_argument('--scenes', nargs='+', default=[])
     parser.add_argument('--eval', action='store_true', default=True)
     parser.add_argument('--skip', type=int, default=8)
-    parser.add_argument('--lower_percentile', type=float, default=0.5)
-    parser.add_argument('--upper_percentile', type=float, default=99.5)
+    parser.add_argument('--lower_percentile', type=float, default=1)
+    parser.add_argument('--upper_percentile', type=float, default=99)
     parser.add_argument('--bounds', type=float, nargs='+', default=[-20., -20., -20., 20., 20., 20.])
+    parser.add_argument('--disable_camera_outlier_filter', action='store_true', default=False)
+    parser.add_argument('--center_outlier_mad_mult', type=float, default=8.0)
+    parser.add_argument('--center_outlier_ratio', type=float, default=10.0)
+    parser.add_argument('--center_outlier_min_inliers', type=int, default=1)
     args = parser.parse_args()
     main(args)
