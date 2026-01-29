@@ -19,7 +19,8 @@ import time
 # 1. [x]Implement bounds for the pcd splat to render only the car itself
 # 2. Trace rays only where the specular mask is above a threshold
 # 3. Benchmark CPU/GPU time using Nsight
-# 4. Look into making a custom renderer, reimplementing everything in Vulkan or CUDA completely. How does 2d surfel rasterization work right now?
+# 4. Look into making a custom renderer, reimplementing everything in Vulkanб D3D12 or CUDA completely. How does 2d surfel rasterization work right now?
+# 5. Bake in the env gaussian to an. image, from the center of the car
 #
 # Speed up compilation in cloud: ensure ninja (apt-get install ninja-build)
 #
@@ -39,6 +40,7 @@ import time
 # 5. Check if maybe the trained surface normals are still the problem (Solution: better surface, for example SolidGS instead of 2dgs)
 # 6. [x] Dellensegel instead of ENV gs
 # 7. Change initial specular value.
+# 8. Implement segmented car loss (specular mask or general loss weight)
 
 #TODO GUI:
 # 1. [x] Find minimal code to load the model and render a frame
@@ -49,13 +51,23 @@ import time
 # 6. Enable switching between gt cameras/views
 
 
-#TODO 26.01.2026
-# [] Deal with init envgs point clouds (Open3D)
-# [] Get Metric3D VIT giant to work
-# [] Create a list of experiments to run (ex. sedan with metric3d, our datasets with sedan config, ...)
+#TODO 26-30.01.2026
+# [x] Deal with init envgs point clouds (Open3D)
+# [x] Generate data configs for all HUK datasets with stablenormal
+# [x] Create a list of experiments to run (ex. sedan with metric3d, our datasets with sedan config, ...)
+# [x] Run experiments
+# [] Get Metric3D VIT giant to work (using the training checkpoint. Handle vertical high-res images correctly)
 # [] Test training in AWS
-# [] Run experiments
 # [] Print out and read envgs, materialrefgs, 2dgs papers
+# [] Understand and redocument the training process and differnet losses at all stages of envgs
+
+# Experiments
+# [x] test sedan -> huk_scenes with sedan config
+# [x] test sedan 0.25x -> sedan 0.5x
+# [] test sedan stablenormal -> sedan metric3d/DTK
+# [] test sedan init_specular 0.001 -> sedan init_specular 0.1/0.01
+# [] test sedan envgs -> sedan materialrefgs ref mask
+
 torch.set_grad_enabled(False)
 
 TRACER = HardwareRendering().cuda()
@@ -340,6 +352,25 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED, render_stripped_
 
 def main():
     pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_50/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_silver/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mitsubishi_totaled_rerun/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/vw_rain/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_rain/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/hyundai_white/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_1/latest.pt")
+
+    # Baselines (sedan config):
+    # [] audi_nbg
+    # [] bmw_nbg
+    # [] mercedes_outside_orbit_2
+    # [] renault_white_rain
+    # [x] audi_silver
+    # [x] bmw_rain
+    # [x] hyundai_white
+    # [x] mercedes_outside_orbit_1
+    # [x] mitsubishi_totaled
+    # [x] vw_rain
 
     # Initialize a viser server and our viewer.
     server = viser.ViserServer(verbose=True)
@@ -417,7 +448,7 @@ def main():
     stripped_env.on_update(lambda _: viewer.rerender(_))
     stripped_env_freq.on_update(lambda _: viewer.rerender(_))
     sh_toggle.on_update(toggle_sh_effects)
-    
+
     # NerfView GUI overrides
     viewer._rendering_tab_handles["viewer_res_slider"].value = 1024
     viewer._rendering_folder.expand_by_default = False

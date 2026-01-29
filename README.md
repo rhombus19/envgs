@@ -20,6 +20,28 @@ uv pip install -e easyvolcap/
 uv run webui.py
 ```
 
+If you want to run on recent cuda versions (higher than cuda 11.8)
+you have to unclude stdint.h/cstint in all occurances of rasterizer_impl.h
+
+Monkey-patch one-liner:
+```bash
+find . -type f -name 'rasterizer_impl.h' -print0 | xargs -0 -I{} sh -c '
+f="{}"
+need=""
+grep -qE "^[[:space:]]*#include[[:space:]]*<stdint\.h>" "$f" || need="${need}#include <stdint.h>\n"
+grep -qE "^[[:space:]]*#include[[:space:]]*<cstdint>"    "$f" || need="${need}#include <cstdint>\n"
+[ -z "$need" ] && exit 0
+if grep -qE "^[[:space:]]*#pragma[[:space:]]+once" "$f"; then
+  sed -i "/^[[:space:]]*#pragma[[:space:]]\+once/a\\
+$need" "$f"
+else
+  sed -i "1i\\
+$need" "$f"
+fi
+'
+```
+
+
 # Datasets
 Convert from colmap to easyvolcap
 ```bash

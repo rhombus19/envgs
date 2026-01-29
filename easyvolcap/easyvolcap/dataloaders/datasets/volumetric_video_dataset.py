@@ -63,7 +63,7 @@ class VolumetricVideoDataset(Dataset):
                  split: str = DataSplit.TRAIN.name,  # dynamically generated
 
                  # The frame number & image size should be inferred from the dataset
-                 ratio: float = 1.0,  # use original image size
+                 ratio: float = 0.25,  # use original image size
                  center_crop_size: List[int] = [-1, -1],  # center crop image to this size, after resize
                  n_rays: int = 512,  # number of rays to sample from a single image
                  view_sample: List = [0, None, 1],  # begin, end, step
@@ -463,6 +463,7 @@ class VolumetricVideoDataset(Dataset):
         # msk_Ds[..., -1] = 0.0  # only use the first 4 distortion parameters for mask undistortion
         # msk_Ds = torch.zeros_like(ori_Ds) # avoid bad distortion params
         ratio = self.imsize_overwrite if self.imsize_overwrite[0] > 0 else self.ratio  # maybe force size, or maybe use ratio to resize
+        print("Ratio: ", ratio)
         if self.use_masks:
             self.mks_bytes, self.Ks, self.Hs, self.Ws = \
                 load_resize_undist_ims_bytes(self.mks, ori_Ks.numpy(), ori_Ds.numpy(), ratio, self.center_crop_size,
