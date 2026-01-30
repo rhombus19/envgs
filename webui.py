@@ -58,7 +58,7 @@ import time
 # [x] Run experiments
 # [] Get Metric3D VIT giant to work (using the training checkpoint. Handle vertical high-res images correctly)
 # [] Test training in AWS
-# [] Print out and read envgs, materialrefgs, 2dgs papers
+# [x] Print out and read envgs, materialrefgs, 2dgs papers
 # [] Understand and redocument the training process and differnet losses at all stages of envgs
 
 # Experiments
@@ -359,12 +359,16 @@ def main():
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_rain/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/hyundai_white/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_1/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_outside_orbit_2/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_nbg/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_nbg/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/renault_white_rain/latest.pt")
 
     # Baselines (sedan config):
-    # [] audi_nbg
-    # [] bmw_nbg
-    # [] mercedes_outside_orbit_2
-    # [] renault_white_rain
+    # [x] audi_nbg
+    # [x] bmw_nbg
+    # [x] mercedes_outside_orbit_2
+    # [x] renault_white_rain
     # [x] audi_silver
     # [x] bmw_rain
     # [x] hyundai_white
