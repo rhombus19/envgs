@@ -19,7 +19,7 @@ import time
 # 1. [x]Implement bounds for the pcd splat to render only the car itself
 # 2. Trace rays only where the specular mask is above a threshold
 # 3. Benchmark CPU/GPU time using Nsight
-# 4. Look into making a custom renderer, reimplementing everything in Vulkanб D3D12 or CUDA completely. How does 2d surfel rasterization work right now?
+# 4. Look into making a custom renderer, reimplementing everything in Vulkan, D3D12 or CUDA completely. How does 2d surfel rasterization work right now?
 # 5. Bake in the env gaussian to an. image, from the center of the car
 #
 # Speed up compilation in cloud: ensure ninja (apt-get install ninja-build)
@@ -33,12 +33,12 @@ import time
 # 
 #
 # TODO:
-# 1. Train with all our datasets using the sedan config
+# 1. [x]Train with all our datasets using the sedan config
+# 3. [x]Train with full resolution (lots of RAM needed)
+# 6. [x] Dellensegel instead of ENV gs
 # 2. Better priors, add depth, mask priors??
-# 3. Train with full resolution (lots of RAM needed)
 # 4. Adapt gaussian density???? To have more gaussians close up without that much sacrifices, maybe do LODs
 # 5. Check if maybe the trained surface normals are still the problem (Solution: better surface, for example SolidGS instead of 2dgs)
-# 6. [x] Dellensegel instead of ENV gs
 # 7. Change initial specular value.
 # 8. Implement segmented car loss (specular mask or general loss weight)
 
@@ -56,17 +56,61 @@ import time
 # [x] Generate data configs for all HUK datasets with stablenormal
 # [x] Create a list of experiments to run (ex. sedan with metric3d, our datasets with sedan config, ...)
 # [x] Run experiments
-# [] Get Metric3D VIT giant to work (using the training checkpoint. Handle vertical high-res images correctly)
-# [] Test training in AWS
 # [x] Print out and read envgs, materialrefgs, 2dgs papers
+#
+#
+# 1. Bring our datasets to sedan baseline performance
+#       1.1 Initial env bounds: tune them manually, retrain
+#           Env gaussian didn't learn at all, it also appears to not cover the entire scene
+#       1.2 Cameras: fix blurred frame detection and optical flow sampling, maybe sample by hand first
+#           Our frame sampling is very inconsistent, not a smooth ellipse around the car like sedan
+#       1.3 Normals: Try other normal estimators, compare, tune StableNormal/run stablenormal on sedan imgs
+#           The normal maps in our dataset are significantly less detailed and inconsistent, learned normals are also very bad
+# 2. Improve sedan baseline performance
+#       2.1 Better normals: test Metric3D and DKT (maybe add more weight to them if they are good, but they also have to be multi-view consistent)
+#       2.2 Higher initial spec value
+#       2.3 car mask/body part mask as specular value loss
+#       2.4 Multi-view consistency loss like materialrefgs, maybe implement other parts of materialrefgs
+#       2.5 Play with training process and co-optimization of SH and Ray tracing. e.g. disable SH completly, see what happens, or set weights. 
+#           Idea is, to not let the optimizer fall into a local minimum by optimizing SH at first (Already kinda implemented, still SH take on some reflections. Maybe because of bad normals and spec map)
+#       2.6 Figure out why sedan 0.5 ratio performed worse. Increase max number of gaussians??(curerntly 1.800.000)
+#3. GUI
+#       3.1 Implement switching of scenes
+#       3.2 Implement gt cameras and gt images overlay
+#       3.3 Bake env gaussian into an env map
+#       3.4 Cast rays only in tiles where spec mask is bigger than T
+#       3.5 [Stretch goal] Develop a wgpu based renderer for 2dgs, implement splat streaming and LODs
+#       3.6 [Stretch goal] Develop a dashboard with visualizations for each step in the pipeline and make each step run in the background
+#
+#4. General
+#       4.1 Come up with a video + SFM points-based GUI to compete with envgs
+#       4.2 Test images vs SFM video vs full splat. Our goal is a better teleexpertise. Splats themselves can be used for difficult claims or for huk autowelt
+#
+#
+# Do sedan baseline again to confirm nothing changed in repo
+#
+# Backlog:
+# [] Test training in AWS
+# [] Get Metric3D VIT giant to work (using the training checkpoint. Handle vertical high-res images correctly)
 # [] Understand and redocument the training process and differnet losses at all stages of envgs
-
+#
 # Experiments
 # [x] test sedan -> huk_scenes with sedan config
 # [x] test sedan 0.25x -> sedan 0.5x
 # [] test sedan stablenormal -> sedan metric3d/DTK
 # [] test sedan init_specular 0.001 -> sedan init_specular 0.1/0.01
 # [] test sedan envgs -> sedan materialrefgs ref mask
+#
+# TO CHECK:
+# 1. Initial ENV gaussian:
+#       - initial bounds are too small
+#       - env gaussian didn't learn at all
+# 2. Colmap capture (views are too sparse)
+#       - sampling is not consistent
+# 3. Normal priors
+#       - Metric3D or DKT?
+# 4. Vertical video?
+
 
 torch.set_grad_enabled(False)
 
@@ -351,11 +395,11 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED, render_stripped_
     return rgb8
 
 def main():
-    pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_50/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_silver/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mitsubishi_totaled_rerun/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/vw_rain/latest.pt")
+    pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/vw_rain/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_rain/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/hyundai_white/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_1/latest.pt")
