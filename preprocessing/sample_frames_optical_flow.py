@@ -7,27 +7,30 @@ import pandas as pd
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 import argparse
-from diskcache import Cache
 
-cache_dir = Path.home() / ".frame_sampler_cache"
-cache = Cache(cache_dir)
+# from diskcache import Cache
+# cache_dir = Path.home() / ".frame_sampler_cache"
+# cache = Cache(cache_dir)
 
-@cache.memoize()
+# @cache.memoize()
 def get_optical_flow_between_frames(frames):
     frame1_path, frame2_path = frames
     img1_bgr = cv2.imread(frame1_path)
     img2_bgr = cv2.imread(frame2_path)
-    
+
     img1_gray = cv2.cvtColor(img1_bgr, cv2.COLOR_BGR2GRAY)
     img2_gray = cv2.cvtColor(img2_bgr, cv2.COLOR_BGR2GRAY)
     
     p0 = cv2.goodFeaturesToTrack(
         img1_gray,
-        maxCorners=500,
+        maxCorners=1000,
         qualityLevel=0.01,
         minDistance=7,
         blockSize=7
     )
+
+    n_init_features = int(len(p0))
+
     p1, st, err = cv2.calcOpticalFlowPyrLK(
         img1_gray,
         img2_gray,
@@ -38,41 +41,87 @@ def get_optical_flow_between_frames(frames):
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
     )
 
-    # Keep only successfully tracked points
-    st = st.reshape(-1)
-    good_new = p1[st == 1]
-    good_old = p0[st == 1]
+    # keep only successfully tracked points
+    good = (st.reshape(-1) == 1)
+    
+    # filter based on error (take 80 percentile)
+    e = err.reshape(-1)
+    if np.any(good):
+        thr = np.percentile(e[good], 80)
+        good &= (e <= thr)
 
-    if len(good_new) < 10:
-        print("Low features:", len(good_new))
-        print(frame1_path)
-        print(frame2_path)
+    p0_good = p0[good]
+    p1_good = p1[good]
+    n_good_tracks = int(good.sum())
+    track_ratio = n_good_tracks / max(n_init_features, 1)
+
+    if n_good_tracks <= 0:
+        raise NotImplementedError("0 good tracks found. No fallback implemented")
+    
+    lk_err_median = float(np.median(err.reshape(-1)[good]))
+
+    disp_raw = p1_good.reshape(-1, 2) - p0_good.reshape(-1, 2)
+    median_flow_magnitude = float(np.median(np.linalg.norm(disp_raw, axis=1))) # median distance the points moved
+
+    # try optical flow backwards to ensure consistency
+    p0_back, st_back, _ = cv2.calcOpticalFlowPyrLK(
+        img2_gray,
+        img1_gray,
+        p1_good.reshape(-1, 1, 2),
+        None,
+        winSize=(21, 21),
+        maxLevel=3,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+    )
+    
+    st_back = st_back.reshape(-1).astype(bool)  # mask of succesful backward tracks
+    fb = np.linalg.norm(
+        p0_back.reshape(-1, 2)[st_back] - p0_good.reshape(-1, 2)[st_back],
+        axis=1,
+    )
+    fb_err_median = float(np.median(fb))  #median error of backwards track
     
     # good_old, good_new from KLT sparse flow snippet
-    pts1 = good_old.reshape(-1, 2).astype(np.float32)
-    pts2 = good_new.reshape(-1, 2).astype(np.float32)
+    p0_good = p0_good.reshape(-1, 2).astype(np.float32)
+    p1_good = p1_good.reshape(-1, 2).astype(np.float32)
 
     F, mask = cv2.findFundamentalMat(
-        pts1,
-        pts2,
+        p0_good,
+        p1_good,
         method=cv2.FM_RANSAC,
         ransacReprojThreshold=2.0,
         confidence=0.99
-    )  #RANSAC
+    )  # RANSAC step
 
     if F is not None and mask is not None:
         inlier_mask = mask.ravel().astype(bool)
-        inliers1 = pts1[inlier_mask]
-        inliers2 = pts2[inlier_mask]
+        ransac_inlier_ratio = float(inlier_mask.mean())
+
+        inliers1 = p0_good[inlier_mask]
+        inliers2 = p1_good[inlier_mask]
 
         disp = inliers2 - inliers1
         mag = np.linalg.norm(disp, axis=1)
-        median_disp = float(np.median(mag))
-        return median_disp
-
+        dist = float(np.median(mag))  # we can use another way to aggregate motion per frame
+        # We basically get a better version of median_flow_magnitude defined previously
     else:
-        print("RANSAC failed for KLT points")
-        return -1
+        raise RuntimeError("RANSAC failed for KLT points")
+
+    # Print for debugging or maybe accumulate them?
+
+    stats = pd.Series({
+        "frame1": frame1_path.name,
+        "frame2": frame2_path.name,
+        "n_init_features:" : n_init_features,
+        "n_good_tracks:" : n_good_tracks,
+        "track_ratio:" : track_ratio,
+        "lk_err_median:" : lk_err_median,
+        "backward_error" : fb_err_median,
+        "median_flow_magnitude:" : median_flow_magnitude,
+        "ransac_inlier_ratio:" : ransac_inlier_ratio,
+        "dist:" : dist,
+    })
+    return dist, stats
 
 
 def select_frames_by_global_motion(df, n_samples,
@@ -139,7 +188,7 @@ def select_frames_by_global_motion(df, n_samples,
     return selected
 
 
-@cache.memoize()
+# @cache.memoize()
 def clearness_score(image_path):
     return cv2.Laplacian(cv2.imread(image_path), cv2.CV_64F).var()
 
@@ -163,6 +212,7 @@ def main():
     pairs = list(zip(frames,frames[1:]))
     with ThreadPoolExecutor() as executor:
         distances = list(tqdm(executor.map(get_optical_flow_between_frames, pairs), total=len(pairs)))
+    distances = [np.nan if d is None else d for d in distances]
     # distances = calculate_optical_flow(pairs)
     
     print("Calculating clearness score for all frames")
@@ -175,7 +225,10 @@ def main():
     df = pd.DataFrame({"image": frames, "dist": distances, "clearness": clearness})
     
     quant_95 = df["dist"][:-1].quantile(0.95)  # considered to be fails of optical flow
-    df = df[df["dist"] < quant_95]
+    if np.isfinite(quant_95):
+        df = df[df["dist"] < quant_95]
+    else:
+        print("No valid dist values, skipping dist filtering.")
     
     sampled_indices = select_frames_by_global_motion(df, n_samples=n_out_frames)
     sampled_frames = df.iloc[sampled_indices]

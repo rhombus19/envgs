@@ -1,0 +1,5 @@
+streamlit>=1.32
+pandas>=2.0
+numpy>=1.24
+opencv-python>=4.8
+plotly>=5.18

@@ -59,7 +59,176 @@ import time
 # [x] Print out and read envgs, materialrefgs, 2dgs papers
 #
 #
-# 1. Bring our datasets to sedan baseline performance
+# TODO 02-06.02.2026:
+# [x] Training in AWS
+# [x] Do sedan baseline again to confirm what changed in repo
+# [] Get Metric3D VIT giant to work (using the training checkpoint. Handle vertical high-res images correctly)
+# [] (1.2) -> 1. Find a good test scene (e.g. mercedes_orbit) 2. Explicitly cut out a full orbit out of the video, sample frames from it, run SFM
+# [] Understand and redocument the training process and differnet losses at all stages of envgs
+#
+# Maybe the performance is worse because we have objects near the car that reflect, but aren't in env gaussians
+# We have a lot of reflective objects in the background, compared to sedan, which only has trees
+# Segment background from car, use only segmented car gt images for training, change loss to ignore background. This way we only have the reflections to learn the env gaussian from
+
+# But there is still a difference between sedan,hatchback and our datasets
+# get a better understanding of our dataset (view all frames, maybe try colmap instead of mast3r, maybe the cam positions are wrong)
+
+
+
+# Choose 1 dataset from our data to test -> VW Rain
+# Hypotheses:
+# 1. [x] Ray tracer code has changed for our scenes -> 0.5db change can explain bad performance?
+# 2. [x] Reflective objects in the background (close to main object) make it harder to split base/env gaussian -> it has worked for hatchback
+# 3. [x] Neural SfM is wrong. Use classical SfM or sampling is bad
+# 4. Capture method is too bad. Test: drop some gt views in sedan dataset, see what happens, or recapture a car the same way they've done in the paper
+# 5. User is reflected in car -> Inpaint myself in gt views or do another capture
+# 6. Normal map too smooth, norm_loss is always active, which means the optim can't introduce surface details
+#
+# Symptoms:
+# 1. Very noisy trained surface normals
+# 2. Artifacts in trained geometry (Reflective surfaces become holes, weird artifacts)
+# 3. Specular mask is almost 0
+#
+# NOTE: Try to disable norm_loss at certain level
+# NOTE: Add depth prior?
+# TODO:
+# 0. [x] Train sedan with Mast3r +0.4db
+# 1. [x] Train VW with old raytracer +0.3db
+# 2. [x]Sample more views (300), try to fix optical flow or sample differently
+# 3. [x] Try denser init env gs (look at init_env_points() in envgs_sampler.py. The args to sample_points_subgrid()) -0.1db
+# 4. Segment car in gt frames, train with that as the base gaussian
+# 5. Inpaint myself in gt images
+# 6. Redo capture in an open field, test different capture methods, maybe train mercedes orbit 1/2
+# 7. [x] Increase lr, more time for optim to figure it out
+# 8. Document findings, the entire process with screenshots and so on
+#
+#
+# What explains the fact that our datasets have such bad quality -> Env gaussian and reflections don't contribute Why?
+# -> Specular mask is way too low valued, reflections don't attribute anything to the final frame. Why? -> 
+# The raytraced reflections don't explain ground-truth reflections. Why? -> The reflection direction is incosistent/wrong. Why?
+# -> The trained normals per gaussian are wrong/incosistent. Why? -> because the prior normals are very inconsistent and they are strong supervisors at train time. Why?
+# -> because the gt frames have captured only a small portion of a car and the normal generation model can't figure out what it is 
+#
+#
+# Metric3D, DKT, StableNormal(up diffusion steps, implement tiles?)
+#
+# The issue with the video: Droplets, fast pan moves, too close perspectives
+# Synthetic data: Test white/black cars, test capture methods, person vs no-person
+#
+# Test capture methods:
+# 1. Vertical orbit vs Horizontal orbit
+# 2. 3 layers vs 5 layers
+# 3. further away vs close-up 
+#
+# What is the right BRDF for us? One that has clearcoat, PBR Reflections.
+# Is Fresnel really that important for cars? In gt views we try not to take pictures with strong angles
+# What is our limiting factor? Why is the ref mask so bad?
+#
+# TODO 19.02-25.02
+# 1. [x] Train with matthias_car, look if the problem was actually vertical format
+# 2. [x] Process matthias_car, sedan, vw_rain through DKT/Metric3D
+# 1. [x] Document DKT/Metric3D/StableNormal for matthias_car, sedan, vw_rain
+# 2. [x] Analyze matthias_car and radu_vw
+# 3. [x] Can we save one of the huk_scenes datasets with damaged cars? -> Probably no, we can try to train with metric3D on known-good datasets to see its impact, but Metric3D is not as sharp as StableNormal. Maybe we can try the normal map consistency notebook
+# 4. [x] Do we have a good synthetic dataset with damage we can train with? -> red car
+# 5. [x] What do we need from Experts? Show them the idea, demos, ask what their pain points are, what's difficult for them, how can they use it, our ideas at the end. (Formative study, future outlook, goal: use cases for 3DGS in insurance)
+# 6. Can we train with higher res or by cutting out the car out of images to achieve higher detail?
+# 7. How do we clearly define the scope of the BA, what to research, what not to research until the deadline?
+# 8. Document findings, future directions
+#
+#
+# TODO 26.02-05.03
+# 1. [x] Text Jaro Dobry, schedule new capture, use constant wb, exposure settings
+# 2. [x] Render red glossy cars
+# 3. [x] Invite Prof. Meyer to the meetup at wednesday
+# 4. [x] Train vw_rain, sedan with Metric3D normal priors
+# 5. [x] Run StableNormal with same seed, same input noise latent
+# 6. [] Run StableNormal with same seed, denoised latent from prev frame taken as start noise latent (maybe add some noise to it)
+# 7. [x] Train sedan with 0.1 init specular value
+# 8. [x] Train sedan with 0.5 ratio and set max number of gaussians from 1.8M to 3.6M
+# 9. [o] Cutout car from background in sedan, enable transparent bg in envgs, train sedan, compare details
+# 10.[] Train sedan without bg on mast3r capture (more initial points on the actual car)
+# 11.[] Implement spec mask prior loss like the normal prior one, run a segmentation model on car body panels, ommit a mask for reflective body panels, train
+# 12.[] Implement a PBR BRDF that supports clearcoat, eyeball car paint material properties, generate material priors for them
+# 13.[] Implement annealing of the normal prior loss, so that after 30-40k steps it stays small
+# 14.[] Look at SpotlessSplats, figure out how to apply it to sedan (DINO features -> seg mask -> loss weight) and test it
+#   
+# Before finishing:
+# 1. Freeze env afer 30k steps, disable norm prior loss, train normals with freezed env
+# 2. Research normal estimation for multi-view/ SVFormer
+# 3. Test BRDF
+# 4. Termine (HUK Autowelt, SP + Prof in die Werkstatt)
+# 5. Formative evaluation
+# 6. Test what happens when you add closeups of damaged areas
+# 7. Run matthias without badly estimated views, maybe the problem is really the mast3r script and that's why synthetic data didn't work that well
+# 8. Why don't synthetic captures work? 
+# 9. Implement disk view like in 2DGS paper (no transparency, smaller)
+#
+# TODO 5.03-12.03
+# [] Deep Dive: Normal map consistency metric
+# [] Deep Dive: car part segmentation model
+# [o] Deep dive: Read papers, figure out how to include reflection distortion information in training
+# [] Start training with sedan no bg COLMAP and MAST3R
+# [x] Map out the Bachelorarbeit, what to write
+#
+#
+# TODO:
+# [] What are the most important arguments in the discussion that I want to make
+# [] What and how many experiments do I need to run to make those arguments (3 datasets per test)
+# [] Reduce scope
+# Work backwards from discussion, arguments back to experiments, preliminaries
+#
+# Maybe we try materialrefgs once again, but we use segmented mask as reflection score
+#
+# How to deal with dents/surface imperfections?
+# People do it by looking at the reflections and seeing how they move, this principle is used in deflectometry, where we know already how the reflection supposed to look like
+# In EnvGS our surface is basically defined by the single-view normal estimation model, which kinda defeats the purpose of finding dents. 
+# It works to get a general sense of how the surface looks like, estimating the environment reflected in the scene, but we are still relying on single view inaccurate normal maps
+# The other source of signal we have are the actual rendered gt views. However the photometric loss delivers too little signal to the normals, because we don't know the environment
+# So the problem is underconstrained, if we only have single rendered gt views to compare our rendered views against (Can we measure that? Magnitude of gradients?)
+# We can try to freeze the env and let normals be fitted, but we also don't know if our environment is correct. And our surface parameters are also underconstrained
+# Righ now we basically use AI generated surface estimation, which uses single views. We could train a better model that does detect surfaces better, but doing it with a single view is inherently ambigious and difficult
+#
+# Another option is to track points/lines in the reflections and do deflectometry on them or train a model that understands how objects should look like and detects when they are deformed by reflection, then it could estimate the surface
+# Do people look at objects themselves or just the distorted "look" or probably more like the change in motion
+#
+# GUI?
+#
+# 
+# BONUS:
+# [] Render out a car with specifically small dents on the door, train with it
+# [] Generate an error map to see what areas of the car contribute to the bad PSNR -> already kinda there with the results folder in data/ , but not helpful for me
+# [x] Train sedan with max sh degree set to 0
+# [x] Train sedan with no sh and 0.1 init specular
+# [x] Train red_vw_synthetic with envgs_synth model config
+#  
+#
+# ANALYSIS
+# [] Why didn't training with 0.1 init specular improve performance? Did it impact training at all? Was there a mistake?  -> the num_pts for both pcd and env spike to max in this run
+# [] Why vw_metric3d didn't improve performance?
+# [] Why sedan_metric3d improved performance? Is it because of the windows? 
+#
+# For dent detection: Basically we model dents pretty much based on the normal map predictions, which are inherently flawed. But, can we really make the optimizer do a dent pass that explicitly tries to correct normals locally and detect dents
+#
+# It would be cool to test how consistent the normals are for each tracked point from mast3r, mb segment it into parts, visualize 
+#
+# We need a normal estimation model that understands multi-view for sure. A lot of the things might not be visible from just one view. And this is kind the whole point of what we are doing
+# The other option is to use priors really only for the start and train for a lot of steps without priors, but then the problem will be kinda underconstrainted
+#
+# A scene with a car in the center can be constrained more to achieve better quality. Things like reflective strength 
+# Or maybe we should explicitly factor out the car paint material and have things like global roughness, metallness. 
+# Nah, for things like dirt the optim should be able to vary these things locally. But also not due to noise, duh \_0_O_/ 
+#
+# Are camera parameters at fault? Is that the difference between sedan and our data? https://github.com/nv-tlabs/ppisp
+# BRDF/segment car/camera parameters/init specular mask/increase max num of gaussians/ Solve BA for exposure and white balance?
+# Spherical harmonics do capture white balance and exposure changes, but its still confusing for the model
+#
+# We can project the estimated normal maps into 3d from gt frames and look at their consistency
+#
+# Talk with someone from HUK Autowelt
+#
+# PLAN:
+# 1. [x] Bring our datasets to sedan baseline performance
 #       1.1 Initial env bounds: tune them manually, retrain
 #           Env gaussian didn't learn at all, it also appears to not cover the entire scene
 #       1.2 Cameras: fix blurred frame detection and optical flow sampling, maybe sample by hand first
@@ -68,37 +237,41 @@ import time
 #           The normal maps in our dataset are significantly less detailed and inconsistent, learned normals are also very bad
 # 2. Improve sedan baseline performance
 #       2.1 Better normals: test Metric3D and DKT (maybe add more weight to them if they are good, but they also have to be multi-view consistent)
+#           - Start with same latent noise for all frames
+#           - Start with frame[n-1] result as latent noise
+#           - Test Metric3D
 #       2.2 Higher initial spec value
 #       2.3 car mask/body part mask as specular value loss
-#       2.4 Multi-view consistency loss like materialrefgs, maybe implement other parts of materialrefgs
-#       2.5 Play with training process and co-optimization of SH and Ray tracing. e.g. disable SH completly, see what happens, or set weights. 
-#           Idea is, to not let the optimizer fall into a local minimum by optimizing SH at first (Already kinda implemented, still SH take on some reflections. Maybe because of bad normals and spec map)
-#       2.6 Figure out why sedan 0.5 ratio performed worse. Increase max number of gaussians??(curerntly 1.800.000)
-#3. GUI
+#       2.4 Figure out why sedan 0.5 ratio performed worse. Increase max number of gaussians??(curerntly 1.800.000)
+#       2.5 Cutout background, train only on the car
+#       2.6 Anneal normal map loss
+#       2.7 PBR BRDF with clear coat + material map priors
+#       2.8 integrate PPISP or take video with constant camera params
+#       2.9 User is reflected in car, so Inpaint myself in gt views or do another capture or use (DINO features -> seg mask -> loss weight)
+#       ~~~~~~Check if maybe the trained surface normals are still the problem (Solution: better surface, for example SolidGS instead of 2dgs)
+#       ~~~~~~Play with training process and co-optimization of SH and Ray tracing. e.g. disable SH completly, see what happens, or set weights. 
+#       ~~~~~~Idea is, to not let the optimizer fall into a local minimum by optimizing SH at first (Already kinda implemented, still SH take on some reflections. Maybe because of bad normals and spec map)
+#       ~~~~~~Multi-view consistency loss like materialrefgs, maybe implement other parts of materialrefgs
+# 3. GUI
 #       3.1 Implement switching of scenes
 #       3.2 Implement gt cameras and gt images overlay
 #       3.3 Bake env gaussian into an env map
 #       3.4 Cast rays only in tiles where spec mask is bigger than T
-#       3.5 [Stretch goal] Develop a wgpu based renderer for 2dgs, implement splat streaming and LODs
+#       3.5 [Stretch goal] Develop a custom renderer for 2dgs, implement splat streaming and LODs
 #       3.6 [Stretch goal] Develop a dashboard with visualizations for each step in the pipeline and make each step run in the background
 #
-#4. General
+# 4. General
 #       4.1 Come up with a video + SFM points-based GUI to compete with envgs
 #       4.2 Test images vs SFM video vs full splat. Our goal is a better teleexpertise. Splats themselves can be used for difficult claims or for huk autowelt
 #
 #
-# Do sedan baseline again to confirm nothing changed in repo
-#
-# Backlog:
-# [] Test training in AWS
-# [] Get Metric3D VIT giant to work (using the training checkpoint. Handle vertical high-res images correctly)
-# [] Understand and redocument the training process and differnet losses at all stages of envgs
+# 
 #
 # Experiments
 # [x] test sedan -> huk_scenes with sedan config
 # [x] test sedan 0.25x -> sedan 0.5x
-# [] test sedan stablenormal -> sedan metric3d/DTK
-# [] test sedan init_specular 0.001 -> sedan init_specular 0.1/0.01
+# [x] test sedan stablenormal -> sedan metric3d/DTK
+# [x] test sedan init_specular 0.001 -> sedan init_specular 0.1/0.01
 # [] test sedan envgs -> sedan materialrefgs ref mask
 #
 # TO CHECK:
@@ -269,20 +442,20 @@ def load_splats(ckpt_path):
     pcd = GaussianModel(
             xyz=torch.empty(1, 3, device="cuda"),
             colors=None,
-            sh_degree=3,
+            sh_degree=state['sampler.pcd.active_sh_degree'],
             render_reflection=True,
             specular_channels=True,
-            xyz_lr_scheduler=None,  # key fix: avoid lr_init/lr_final access
+            xyz_lr_scheduler=None,  # avoid lr_init/lr_final access
         )
 
     # initialize GaussianModel
     env = GaussianModel(
             xyz=torch.empty(1, 3, device="cuda"),
             colors=None,
-            sh_degree=3,
+            sh_degree=state['sampler.env.active_sh_degree'],
             render_reflection=False,
             specular_channels=True,
-            xyz_lr_scheduler=None,  # key fix: avoid lr_init/lr_final access
+            xyz_lr_scheduler=None,  # avoid lr_init/lr_final access
         )
 
     # Separate parameters of pcd and env based on prefix. NOTE: Pretty smelly code
@@ -350,13 +523,12 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED, render_stripped_
         env_rgb = env_out.render.permute(1, 2, 0)
 
     else:
-        #TODO: Check math. Code written by ChatGPT
+        #TODO: Refactor, add comments
         x, y, z = ref_d[...,0], ref_d[...,1], ref_d[...,2]
         
-        lon = torch.atan2(x, z)              # [-pi, pi], seam at pi/-pi
-        s = 0.5 + 0.5 * torch.sin(stripes_freq * lon)   # N = stripe frequency around 360
+        lon = torch.atan2(x, z)
+        s = 0.5 + 0.5 * torch.sin(stripes_freq * lon)   # N - stripe frequency around 360
 
-        # sharpen (smooth binary)
         sharp = 10.0
         s = s**sharp / (s**sharp + (1-s)**sharp + 1e-8)
 
@@ -395,35 +567,64 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED, render_stripped_
     return rgb8
 
 def main():
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/matthias_vw_metric3d_fixed_50/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/red_vw_envgs_synth_model_conf/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/sedan_no_sh_01_init_specular/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_mast3r/latest.pt")
+    pcd, env = load_splats("/mnt/e/BA/results/data/trained_model/yellow_van_small_dent_lotusv2/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/sedan_no_bg_01_spec/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_a_class_stablenormal/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/white_van_stablenormal/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/yellow_van_stablenormal/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/radu_mercedes/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/matthias_vw/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_rerun/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_50/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_silver/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mitsubishi_totaled_rerun/latest.pt")
-    pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/vw_rain/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_rain/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/hyundai_white/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_1/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_outside_orbit_2/latest.pt")
+    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_2/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_nbg/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_nbg/latest.pt")
     # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/renault_white_rain/latest.pt")
 
+    # Observation: 
+    #
+    # sedan          res: 336x220; frame time: 0.032398
+    # sedan          res: 1024x669; frame time: 0.114060
+    # renault white: res: 45x30;   frame time: 0.216973
+    # renault white: res: 1024x669; frame time: 0.066036   <--- wtf?
+    #
+    # When I disable raytracing by enabling stripes, the frame times stay the same
+    # sedan         has 1 800 000 base gaussians, 507497 env gaussians
+    # renault white has 1 800 000 base gaussians, 81510 env gaussians
+    #
+    # Interpretation: renault white concentrates the splats on the car to reproduce reflections instead of relying on the raytracing
+    #
     # Baselines (sedan config):
-    # [x] audi_nbg
-    # [x] bmw_nbg
-    # [x] mercedes_outside_orbit_2
-    # [x] renault_white_rain
-    # [x] audi_silver
-    # [x] bmw_rain
-    # [x] hyundai_white
-    # [x] mercedes_outside_orbit_1
-    # [x] mitsubishi_totaled
-    # [x] vw_rain
+    #[x] audi_nbg
+    #[x] bmw_nbg
+    #[x] mercedes_outside_orbit_2
+    #[x] renault_white_rain
+    #[x] audi_silver
+    #[x] bmw_rain
+    #[x] hyundai_white
+    #[x] mercedes_outside_orbit_1
+    #[x] mitsubishi_totaled
+    #[x] vw_rain
 
     # Initialize a viser server and our viewer.
     server = viser.ViserServer(verbose=True)
 
     # GUI
+    with server.gui.add_folder("Splat Stats"):
+        base_splats_rendered = server.gui.add_number("Base splats rendered", initial_value=0, min=0, step=1, disabled=True)
+        env_splats_total = server.gui.add_number("Env splats total", initial_value=0, min=0, step=1, disabled=True)
+
     with server.gui.add_folder("Camera Origin"):
         rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0)
         rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0)
@@ -433,17 +634,22 @@ def main():
         off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0)
     
     with server.gui.add_folder("Splat Controls"):
-        aabb_x = server.gui.add_multi_slider("AABB X", -10, 10, 0.1, (-2.5, 2.5))
-        aabb_y = server.gui.add_multi_slider("AABB Y", -10, 10, 0.1, (-2.5, 2.5))
-        aabb_z = server.gui.add_multi_slider("AABB Z", -10, 10, 0.1, (-2.5, 2.5))
+        aabb_x = server.gui.add_multi_slider("AABB X", -50, 50, 0.1, (-2.5, 2.5))
+        aabb_y = server.gui.add_multi_slider("AABB Y", -50, 50, 0.1, (-2.5, 2.5))
+        aabb_z = server.gui.add_multi_slider("AABB Z", -50, 50, 0.1, (-2.5, 2.5))
         render_pass = server.gui.add_dropdown("Render Pass", [render_pass.name for render_pass in RenderPass], initial_value=RenderPass.COMBINED.name)
         sh_toggle = server.gui.add_checkbox("Disable SH", initial_value=False)
         stripped_env = server.gui.add_checkbox("Enable stripes", initial_value=False)
         stripped_env_freq = server.gui.add_slider("Stripe frequency", min=0, max=500, step=1, initial_value=100)
 
+    def update_splat_stats():
+        base_splats_rendered.value = int(pcd.get_xyz.shape[0])
+        env_splats_total.value = int(env.get_xyz.shape[0])
+
     def render_fn(
         camera_state, render_tab_state
     ) -> np.ndarray:
+        # t1 = time.perf_counter()
         if render_tab_state.preview_render:
             width = render_tab_state.render_width
             height = render_tab_state.render_height
@@ -462,6 +668,8 @@ def main():
 
         cam = get_render_inputs(width, height, c2w, K)
         img = render_frame(pcd, env, cam, RenderPass[render_pass.value], render_stripped_env_only=stripped_env.value, stripes_freq=stripped_env_freq.value)
+        # torch.cuda.synchronize()
+        # print(f"res: {width}x{height}; frame time: {(time.perf_counter() - t1):04f}")
         return img
 
     viewer = nerfview.Viewer(server=server, render_fn=render_fn, mode='rendering')
@@ -480,6 +688,7 @@ def main():
                 max(0.5, ymax), 
                 min(-0.5, zmin), 
                 max(0.5, zmax))
+            update_splat_stats()
         
         viewer.rerender(_)
     
@@ -502,7 +711,7 @@ def main():
     viewer._rendering_folder.expand_by_default = False
     
     # Apply AABB from the start
-    _apply_aabb()
+    # _apply_aabb()
 
     while True:
         time.sleep(1.0)

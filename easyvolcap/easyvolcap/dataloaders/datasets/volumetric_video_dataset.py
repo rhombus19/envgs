@@ -916,6 +916,8 @@ class VolumetricVideoDataset(Dataset):
             else:
                 norm = torch.as_tensor(load_image_from_bytes(nm_bytes, normalize=True))  # readin as is
 
+        norm = self.match_normal_resolution(rgb, norm, view_index, latent_index, source='bytes')
+
         return rgb, msk, wet, dpt, bkg, norm
 
     def get_image_from_disk(self, view_index: int, latent_index: int, output: dotdict = None):
@@ -999,7 +1001,29 @@ class VolumetricVideoDataset(Dataset):
         if 'nm' not in locals(): nm = None
         else: nm = torch.as_tensor(normalize_image(nm))
 
+        nm = self.match_normal_resolution(im, nm, view_index, latent_index, source='disk')
+
         return im, mk, wt, dp, bg, nm
+
+    def match_normal_resolution(self,
+                                rgb: torch.Tensor,
+                                norm: torch.Tensor,
+                                view_index: int,
+                                latent_index: int,
+                                source: str = 'unknown'):
+        if norm is None or rgb is None:
+            return norm
+
+        rgb_h, rgb_w = rgb.shape[:2]
+        norm_h, norm_w = norm.shape[:2]
+        if (rgb_h, rgb_w) == (norm_h, norm_w):
+            return norm
+
+        warn_once(
+            f'Normal priors do not match RGB resolution for view={view_index}, latent={latent_index}: '
+            f'rgb={rgb_h}x{rgb_w}, norm={norm_h}x{norm_w}. Resizing normals to match RGB ({source}).'
+        )
+        return as_torch_func(partial(cv2.resize, dsize=(rgb_w, rgb_h), interpolation=cv2.INTER_LINEAR))(norm)
 
     def get_image(self, view_index: int, latent_index: int, output: dotdict = None):
         if not self.disk_dataset:
@@ -1313,15 +1337,15 @@ class VolumetricVideoDataset(Dataset):
             render_center_crop_ratio = self.render_center_crop_ratio[output.view_index] if len(self.render_center_crop_ratio.shape) else self.render_center_crop_ratio
 
             w, h = int(W * render_center_crop_ratio), int(H * render_center_crop_ratio)
-            x, y = w // 2, h // 2
+            x, y = (W - w) // 2, (H - h) // 2
 
             # Center crop the target image
             rgb = rgb[y: y + h, x: x + w, :]
             msk = msk[y: y + h, x: x + w, :]
             wet = wet[y: y + h, x: x + w, :]
-            if dpt is not None: dpt[y: y + h, x: x + w, :]
-            if bkg is not None: bkg[y: y + h, x: x + w, :]
-            if norm is not None: norm[y: y + h, x: x + w, :]
+            if dpt is not None: dpt = dpt[y: y + h, x: x + w, :]
+            if bkg is not None: bkg = bkg[y: y + h, x: x + w, :]
+            if norm is not None: norm = norm[y: y + h, x: x + w, :]
 
             # Crop the intrinsics
             self.crop_ixts(output, x, y, w, h)
@@ -1370,6 +1394,13 @@ class VolumetricVideoDataset(Dataset):
             if dpt is not None: dpt = dpt[y: y + h, x: x + w, :]
             if bkg is not None: bkg = bkg[y: y + h, x: x + w, :]
             if norm is not None: norm = norm[y: y + h, x: x + w, :]
+
+        if norm is not None and norm.shape[:2] != rgb.shape[:2]:
+            raise RuntimeError(
+                f'Normal prior resolution mismatch after dataset transforms for '
+                f'view={output.view_index}, latent={output.latent_index}: '
+                f'rgb={tuple(rgb.shape[:2])}, norm={tuple(norm.shape[:2])}.'
+            )
 
         output.rgb = rgb.reshape(-1, 3)  # full image in case you need it
         output.msk = msk.reshape(-1, 1)  # full mask

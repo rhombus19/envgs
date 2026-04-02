@@ -22,13 +22,15 @@ def detect_model_format(path, ext):
 @catch_throw
 def main(args):
     # Define the per-scene processing function
-    def process_scene(scene):
+    def process_scene(scene, data_root=None, output=None):
         log(f'processing scene: {scene}')
 
         # Data paths
-        data_root = join(args.data_root, scene)
+        if data_root is None:
+            data_root = join(args.data_root, scene)
         colmap = join(data_root, args.colmap)
-        output = join(args.output, scene)
+        if output is None:
+            output = join(args.output, scene)
 
         # cameras, images, points3D = read_model(path=args.colmap)
         ext = ''
@@ -89,7 +91,13 @@ def main(args):
                 # Link images
                 src_images_dir = join(data_root, args.src_images_dir)
                 tar_images_dir = join(output, args.tar_images_dir, f'{cnt:0{args.digit}d}')
+                
+                src_normals_dir = join(data_root, args.src_normals_dir)
+                tar_normals_dir = join(output, args.tar_normals_dir, f'{cnt:0{args.digit}d}')
+
                 os.makedirs(tar_images_dir, exist_ok=True)
+                os.makedirs(tar_normals_dir, exist_ok=True)
+                
                 # Check if val.name is a file or a directory
                 if not exists(join(src_images_dir, val.name)):
                     if exists(join(src_images_dir, val.name.replace('.jpg', '.JPG'))):
@@ -104,6 +112,7 @@ def main(args):
                         log(f'cannot find image: {val.name}', 'red')
                         continue
                 os.system(f'ln -s {abspath(join(src_images_dir, val.name))} {tar_images_dir}/{0:06d}.{args.ext}')
+                os.system(f'ln -s {abspath(join(src_normals_dir, val.name))} {tar_normals_dir}/{0:06d}.png')
 
                 # Increment counter
                 cnt += 1
@@ -118,9 +127,10 @@ def main(args):
         os.makedirs(f'{output}/sparse', exist_ok=True)
         os.system(f'cp -r {colmap} {output}/sparse')
 
-    # data_root is the scene
+    # data_root points to a single scene root containing images/ and sparse/
     if not args.multi_scene:
-        process_scene(args.data_root)
+        scene = os.path.basename(os.path.normpath(args.data_root)) or 'scene'
+        process_scene(scene, data_root=args.data_root, output=args.output)
         return
     
     # Find all scenes
@@ -150,6 +160,8 @@ if __name__ == "__main__":
     parser.add_argument('--colmap', type=str, default='sparse/0')
     parser.add_argument('--src_images_dir', type=str, default='images')
     parser.add_argument('--tar_images_dir', type=str, default='images')
+    parser.add_argument('--src_normals_dir', type=str, default='normals')
+    parser.add_argument('--tar_normals_dir', type=str, default='normals')
     parser.add_argument('--output', type=str, default='data/datasets/refnerf/ref_real')
     parser.add_argument('--sub', type=str, default='')  # only camera name containing this string will be saved
     parser.add_argument('--scale', type=float, default=1.0)

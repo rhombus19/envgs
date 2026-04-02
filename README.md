@@ -164,3 +164,10 @@ This is what a test batch can look like:
     'frac': 1.0
 }
 ```
+
+# Analysis
+
+Launch Tensorboard:
+```bash
+uv run tensorboard --logdir data/record/ --bind_all
+```
