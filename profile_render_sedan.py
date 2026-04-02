@@ -17,10 +17,14 @@ REPEATS = 5
 
 IMAGE_HEIGHT = 1080
 IMAGE_WIDTH = 1920
-CX = 646.0
-CY = 419.5
+REFERENCE_IMAGE_WIDTH = 1292
+REFERENCE_IMAGE_HEIGHT = 839
+REFERENCE_CX = 646.0
+REFERENCE_CY = 419.5
 
 # Extracted once from the sedan Mast3r dataset at ratio 0.25.
+# These intrinsics correspond to the 1292x839 resized images, so output
+# resolution changes should rescale pixel density without changing FoV.
 # Each entry is (fx, fy, R, T) for one validation view.
 VAL_CAMERAS = [
     (955.5135224407, 955.1292059117, [[0.9890409119983057, -0.04107428115427937, 0.1418131792931075], [-0.026269708136568256, 0.8962380276514441, 0.44279487375744175], [-0.14528584524302207, -0.4416676365991835, 0.8853370668581046]], [0.2719437216, -1.4898544212, 3.7450671647]),
@@ -78,13 +82,24 @@ def get_projection_matrix(fovx, fovy, znear, zfar):
 
 
 def make_camera_batch(fx, fy, r, t, near=0.1, far=100.0):
-    k = torch.tensor([[fx, 0.0, CX], [0.0, fy, CY], [0.0, 0.0, 1.0]], dtype=torch.float32, device="cuda")
+    scale_x = IMAGE_WIDTH / REFERENCE_IMAGE_WIDTH
+    scale_y = IMAGE_HEIGHT / REFERENCE_IMAGE_HEIGHT
+    scaled_fx = fx * scale_x
+    scaled_fy = fy * scale_y
+    scaled_cx = REFERENCE_CX * scale_x
+    scaled_cy = REFERENCE_CY * scale_y
+
+    k = torch.tensor(
+        [[scaled_fx, 0.0, scaled_cx], [0.0, scaled_fy, scaled_cy], [0.0, 0.0, 1.0]],
+        dtype=torch.float32,
+        device="cuda",
+    )
     r = torch.tensor(r, dtype=torch.float32, device="cuda")
     t = torch.tensor(t, dtype=torch.float32, device="cuda").view(3, 1)
     znear = torch.tensor(near, dtype=torch.float32, device="cuda")
     zfar = torch.tensor(far, dtype=torch.float32, device="cuda")
-    fovx = focal2fov(fx, IMAGE_WIDTH)
-    fovy = focal2fov(fy, IMAGE_HEIGHT)
+    fovx = focal2fov(scaled_fx, IMAGE_WIDTH)
+    fovy = focal2fov(scaled_fy, IMAGE_HEIGHT)
     world_view = get_world_to_view(r, t).T
     proj = get_projection_matrix(fovx, fovy, znear, zfar).T
 
