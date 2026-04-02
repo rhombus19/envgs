@@ -14,12 +14,11 @@ dependencies = [
     "ujson>=5.11.0",
     "diff-surfel-rasterization-wet-ch05",
     "diff-surfel-tracing",
+    "setuptools>=82.0.1",
+    "opencv-python-headless>=4.13.0.92",
 ]
 
 [tool.uv.sources]
-torch = [
-  { index = "cu128" },
-]
 diff-surfel-tracing = { path = "submodules/diff-surfel-tracing" }
 diff-surfel-rasterization-wet-ch05 = { path = "submodules/diff-surfel-rasterizations/diff-surfel-rasterization-wet-ch05" }
 
@@ -27,7 +26,3 @@ diff-surfel-rasterization-wet-ch05 = { path = "submodules/diff-surfel-rasterizat
 diff-surfel-tracing = ["torch==2.3.1", "setuptools"]
 diff-surfel-rasterization-wet-ch05 = ["torch==2.3.1"]
 
-[[tool.uv.index]]
-name = "cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true

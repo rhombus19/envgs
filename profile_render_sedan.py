@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import cv2
 
 from easyvolcap.utils.base_utils import dotdict
 from easyvolcap.utils.gaussian2d_utils import GaussianModel, render
@@ -10,12 +11,12 @@ from easyvolcap.utils.optix_utils import HardwareRendering
 from easyvolcap.utils.ray_utils import get_rays
 
 
-CKPT_PATH = "data/trained_model/envgs_sedan_mast3r/latest.pt"
+CKPT_PATH = "/workspace/latest.pt"
 WARMUP = 3
 REPEATS = 5
 
-IMAGE_HEIGHT = 839
-IMAGE_WIDTH = 1292
+IMAGE_HEIGHT = 1080
+IMAGE_WIDTH = 1920
 CX = 646.0
 CY = 419.5
 
@@ -179,7 +180,7 @@ def render_frame(pcd, env, cam, tracer, bg, ev=None):
     rgb = (1.0 - spec) * dif_rgb + spec * env_out.render.permute(1, 2, 0)
     if ev is not None:
         ev[4].record()
-    return rgb
+    return (rgb.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
 
 
 def profile_view(pcd, env, cam, tracer, bg):
@@ -188,14 +189,14 @@ def profile_view(pcd, env, cam, tracer, bg):
     torch.cuda.synchronize()
 
     samples = {"frame_ms": [], "raster_ms": [], "raytrace_ms": []}
-    for _ in range(REPEATS):
+    for i in range(REPEATS):
         ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)]
-        _ = render_frame(pcd, env, cam, tracer, bg, ev)
+        img = render_frame(pcd, env, cam, tracer, bg, ev)
         torch.cuda.synchronize()
         samples["frame_ms"].append(ev[0].elapsed_time(ev[4]))
         samples["raster_ms"].append(ev[0].elapsed_time(ev[1]))
         samples["raytrace_ms"].append(ev[2].elapsed_time(ev[3]))
-
+    cv2.imwrite(f"/workspace/{abs(hash(cam.world_view_transform))}.png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
     return {key: float(np.mean(values)) for key, values in samples.items()}
 
 
