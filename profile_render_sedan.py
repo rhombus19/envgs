@@ -11,14 +11,14 @@ from easyvolcap.utils.optix_utils import HardwareRendering
 from easyvolcap.utils.ray_utils import get_rays
 
 
-CKPT_PATH = "/workspace/latest.pt"
+CKPT_PATH = "data/trained_model/envgs_sedan_01_init_specular/latest.pt"
 WARMUP = 3
 REPEATS = 5
 
 IMAGE_HEIGHT = 1080
 IMAGE_WIDTH = 1920
-REFERENCE_IMAGE_WIDTH = 1292
-REFERENCE_IMAGE_HEIGHT = 839
+REFERENCE_IMAGE_WIDTH = 1920
+REFERENCE_IMAGE_HEIGHT = 1080
 REFERENCE_CX = 646.0
 REFERENCE_CY = 419.5
 
@@ -211,7 +211,6 @@ def profile_view(pcd, env, cam, tracer, bg):
         samples["frame_ms"].append(ev[0].elapsed_time(ev[4]))
         samples["raster_ms"].append(ev[0].elapsed_time(ev[1]))
         samples["raytrace_ms"].append(ev[2].elapsed_time(ev[3]))
-    cv2.imwrite(f"/workspace/{abs(hash(cam.world_view_transform))}.png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
     return {key: float(np.mean(values)) for key, values in samples.items()}
 
 

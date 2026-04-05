@@ -97,15 +97,17 @@ def format_bounds(min_xyz, max_xyz):
     return f"[[{format_vec(min_xyz)}], [{format_vec(max_xyz)}]]"
 
 
-def build_yaml_config(data_root, view_sample, val_view_sample, preload_gs, preload_env_gs_path, spatial_scale, min_xyz, max_xyz):
+def build_yaml_config(data_root, view_sample, val_view_sample, preload_gs, preload_env_gs_path, spatial_scale, min_xyz, max_xyz, ratio):
     lines = []
     lines.append("dataloader_cfg:")
     lines.append("    dataset_cfg: &dataset_cfg")
+    lines.append(f"        ratio: {ratio}")
     lines.append(f"        data_root: {data_root}")
     lines.extend(format_list_lines(view_sample, "        view_sample: "))
     lines.append("")
     lines.append("val_dataloader_cfg:")
     lines.append("    dataset_cfg:")
+    lines.append(f"        ratio: {ratio}")
     lines.append("        <<: *dataset_cfg")
     lines.extend(format_list_lines(val_view_sample, "        view_sample: "))
     lines.append("")
@@ -235,6 +237,10 @@ def main(args):
         preload_env_gs_path= Path(data_root) / "env" / "points3D.ply"
         preload_env_gs_path.parent.mkdir(exist_ok=True, parents=True)
 
+        img_size = cv2.imread(Path(data_root) / "images" / "0000" / "000000.jpg").shape
+
+        ratio = 0.25 if img_size[:2] == (3840, 2160) else 0.5
+
         if args.output_yaml:
             yaml_text = build_yaml_config(
                 data_root=data_root,
@@ -245,6 +251,7 @@ def main(args):
                 spatial_scale=radius,
                 min_xyz=min_xyz,
                 max_xyz=max_xyz,
+                ratio=ratio,
             )
             out_path = resolve_yaml_output_path(scene, args.output_yaml, len(scenes) > 1)
             if out_path == "-":
