@@ -20,8 +20,11 @@ uv pip install -e easyvolcap/
 uv run webui.py
 ```
 
+Installation in AWS:
+
+
 If you want to run on recent cuda versions (higher than cuda 11.8)
-you have to unclude stdint.h/cstint in all occurances of rasterizer_impl.h
+you have to include stdint.h/cstint in all occurances of rasterizer_impl.h
 
 Monkey-patch one-liner:
 ```bash
@@ -43,30 +46,43 @@ fi
 
 
 # Datasets
-Convert from colmap to easyvolcap
+An EnvGS dataset requires:
+- images in the easyvolcap format (1 folder per image in our case)
+- normal maps in the easyvolcap format
+- camera poses in intri.yaml, extri.yaml
+- initial base point cloud
+- metadata to generate the initial env point cloud
+
+Initially the scene we use is structured like this:
+1. images/ folder with all gt frames ordered by name
+2. stablenormal_normals/ folder with normal map images (be aware of the normal convention, tagent space normal maps used are inverted and don't contain the standard magenta-blue-light green)
+The same folders exist for other normal map predictors
+3. colmap_sparse/0/ folder for the sparse point cloud and camera poses
+The same folder exist for other SfM algorithms, they all adhere to the standard colmap scheme
+
+The next step is to generate a training dataset in the correct format. This is done using the colmap_to_easyvolcap.py script
+
 ```bash
-uv run scripts/preprocess/colmap_to_easyvolcap.py --data_root data/datasets/original/ref_real --output data/datasets/
+uv run easyvolcap/scripts/preprocess/colmap_to_easyvolcap.py --data_root data/datasets/original/ref_real --src_normals_dir stblenormal_normals/ --colmap colmap_sparse/0/ --output data/datasets/ --multi-scene
 ```
-NOTE: This script symlinks images from the original folder. To archive the dataset, use `tar -czhf dataset.tar.gz dataset_dir/`
+You can provide custom paths for different normal maps and colmap models to generate the training dataset you need. Use --multi-scene if your data_root contains multiple scenes in subfolders of data_root
 
-An EnvGS dataset requires a couple of things:
-- initial pointcloud for the base gaussian: e.g. colmap's points3D.ply
-- initial env gaussian: e.g. random point cloud within certain bounds
-- intri.yaml, extri.yaml: can be obtained from a colmap model using colmap_to_easyvolcap.py
-- spatial_scale: 5.231606340408326
+NOTE: This script symlinks images and normals from the original folder. To archive the dataset, use the -h flag in tar to follow symlinks `tar -czhf dataset.tar.gz dataset_dir/`
 
-model_cfg:
-    sampler_cfg:
-        # Base Gaussian
-        densify_until_iter: 30000
-        normal_prop_until_iter: 24000
-        color_sabotage_until_iter: 24000
-        sh_start_iter: 10000 # let the base Gaussian be view-independent first
-        # Environment Gaussian
-        env_densify_until_iter: 30000
-        init_specular: 0.1 # large initial specular
-    supervisor_cfg:
-        perc_loss_weight: 0.1
+The second step is generating the metadata and the dataset config. This is done using another script
+```bash
+uv run easyvolcap/scripts/preprocess/tools/generate_metadata.py --data_root data/datasets/original/ref_real --scenes sedan --output_yaml config/ref_real
+```
+Note that the equivalent to the 
+
+
+The datasets we provided are structured
+
+Convert from colmap to easyvolcap
+
+
+
+# Issues encountered:
 
 
 # Training

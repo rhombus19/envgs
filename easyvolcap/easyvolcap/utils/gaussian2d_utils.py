@@ -2,6 +2,7 @@ import os
 import math
 import numpy as np
 from plyfile import PlyData, PlyElement
+import open3d as o3d
 
 import torch
 from torch import nn
@@ -300,6 +301,10 @@ class GaussianModel(nn.Module):
         self.selection_mask = selection_mask
         self.render_sh = True
 
+        # Alignment
+        self.groundplane_transform = None
+        self.groundplane = None
+
         # Set scene spatial scale
         self.spatial_scale = spatial_scale
 
@@ -377,6 +382,10 @@ class GaussianModel(nn.Module):
         return self._xyz[self.selection_mask] if self.selection_mask is not None else self._xyz
 
     @property
+    def get_centroid(self):
+        return self.get_xyz.median(dim=0)[0]
+
+    @property
     def get_features(self):
         features_dc = self._features_dc[self.selection_mask] if self.selection_mask is not None else self._features_dc
         features_rest = self._features_rest[self.selection_mask] if self.selection_mask is not None else self._features_rest
@@ -403,6 +412,17 @@ class GaussianModel(nn.Module):
     def get_max_sh_channels(self):
         return (self.max_sh_degree + 1)**2
     
+    def fit_plane(self, distance_threshold):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(self.get_xyz.detach().cpu().numpy())
+
+        plane_model, inliers = pcd.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=3,
+            num_iterations=2000,
+        )
+        return plane_model
+
     def toggle_sh(self):
         self.render_sh = not self.render_sh
 

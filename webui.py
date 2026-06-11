@@ -1,8 +1,12 @@
+from turtle import position
+
 import numpy as np
 import math
 import os
 from contextlib import contextmanager
 import torch
+import cv2
+from pathlib import Path
 from easyvolcap.utils.base_utils import dotdict
 from easyvolcap.utils.gaussian2d_utils import GaussianModel
 from easyvolcap.utils.gaussian2d_utils import render
@@ -12,6 +16,8 @@ from easyvolcap.utils.ray_utils import get_rays
 import viser
 import nerfview
 import time
+from tempfile import TemporaryDirectory
+import gzip
 
 # Profile python: sudo py-spy top --pid {PID}
 #
@@ -296,6 +302,73 @@ def fov2focal(fov, pixels):
 def focal2fov(focal, pixels):
     return 2 * np.arctan(pixels / (2 * focal))
 
+def vector_projection(a, b):
+    dot_ab = np.dot(a, b)
+    dot_bb = np.dot(b, b)
+
+    if dot_bb == 0:
+        raise ValueError("The lenght of the b vector is 0")
+
+    return (dot_ab / dot_bb) * b
+
+def get_square_from_plane(normal, point, square_lenght):
+    """
+    Calculates corner coordinates of a square on a 3D plane
+    The plane defined by a normal vector + a single point on the plane
+    """
+
+    # find a vector, not parallel to the normal
+    smallest_valued_axis = np.argmin(np.abs(normal))
+    initial_u = np.zeros(3)
+    initial_u[smallest_valued_axis] = 1.0
+
+    # project some initial vector onto the plane
+    u = initial_u - vector_projection(initial_u, normal)  # initial_u projected onto the plane
+    u = u / np.linalg.norm(u)
+
+    v = np.cross(normal, u)
+    v = v / np.linalg.norm(v)
+
+    # now, take the origin of the plane, take some steps in the u and v direction
+    step = square_lenght / 2.0
+    corner_tr = point - ( v * step +  u * step)
+    corner_tl = point - ( v * step + -u * step)
+    corner_br = point - (-v * step +  u * step)
+    corner_bl = point - (-v * step + -u * step)
+
+    points = np.array([corner_tr, corner_tl, corner_bl, corner_br])
+    return points
+
+
+
+def get_rotation_between(a, b, eps=1e-8):
+    # AI code
+    # normalize
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+
+    # Same direction: no rotation
+    if c > 1 - eps:
+        return np.eye(3)
+
+    # Opposite direction: 180deg rotation around any perpendicular axis
+    if c < -1 + eps:
+        axis = np.zeros(3)
+        axis[np.argmin(np.abs(a))] = 1.0
+        v = np.cross(a, axis)
+        v = v / np.linalg.norm(v)
+        return 2 * np.outer(v, v) - np.eye(3)
+
+    K = np.array([
+        [0,     -v[2],  v[1]],
+        [v[2],   0,   -v[0]],
+        [-v[1],  v[0],  0],
+    ])
+
+    return np.eye(3) + K + K @ K / (1 + c)
 
 def rotation_matrix_xyz(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
     rx, ry, rz = np.deg2rad([rx_deg, ry_deg, rz_deg])
@@ -381,6 +454,73 @@ def apply_origin_transform(
     c2w[:3, 3] = R @ c2w[:3, 3] + t
 
     return c2w
+
+def look_at(position, target, world_up=np.array([0.0, 0.0, 1.0])):
+    # viser frustums use OpenCV camera axes: +Z forward, +X right, +Y down.
+
+    forward = target - position
+    forward /= np.linalg.norm(forward)
+
+    right = np.cross(forward, world_up)
+    if np.linalg.norm(right) < 1e-8:
+        world_up = np.array([0.0, 1.0, 0.0])
+        right = np.cross(forward, world_up)
+    right /= np.linalg.norm(right)
+
+    down = np.cross(forward, right)
+    down /= np.linalg.norm(down)
+
+    R = np.stack([right, down, forward], axis=1)  # ortogonal rotation basis looking at the roi
+    return R
+
+
+def draw_camera_circle(
+    server: viser.ViserServer,
+    points,
+    center,
+    fov_rad=np.deg2rad(50.0),
+    aspect=16.0 / 9.0,
+    name="/circle_orbit",
+):
+
+
+    # Simplest exact circle overlay: line segments between consecutive samples.
+    # segments = np.stack([points, np.roll(points, -1, axis=0)], axis=1)
+
+    server.scene.add_spline_catmull_rom(
+        f"{name}/ring",
+        points=points,
+        color=(220, 220, 220),
+        closed=True,
+        line_width=2.0,
+        tension=0.5,
+        segments=128,
+    )
+
+    # Optional sample markers.
+    server.scene.add_point_cloud(
+        f"{name}/samples",
+        points=points,
+        colors=np.tile(np.array([[255, 140, 0]], dtype=np.uint8), (len(points), 1)),
+        point_size=0.05,
+    )
+
+    # One frustum per sampled camera pose/
+    for i, position in enumerate(points):
+        R = look_at(position, center)
+        wxyz = viser.transforms.SO3.from_matrix(R).wxyz
+        server.scene.add_camera_frustum(
+            f"{name}/cam_{i}",
+            fov=fov_rad,
+            aspect=aspect,
+            scale=0.12,
+            color=(200, 10, 30),
+            wxyz=wxyz,
+            position=position,
+        )
+        
+
+    return points
 
 def get_render_inputs(W, H, c2w, K):
     Rc = c2w[:3, :3]
@@ -567,31 +707,31 @@ def render_frame(pcd, env, cam, renderpass=RenderPass.COMBINED, render_stripped_
     return rgb8
 
 def main():
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/matthias_vw_metric3d_fixed_50/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/red_vw_envgs_synth_model_conf/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/sedan_no_sh_01_init_specular/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_no_bg/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_mast3r/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/radu_mercedes/latest.pt")
-    pcd, env = load_splats("/mnt/e/BA/results/data/trained_model/white_vanstablenormal_colmap_baseline/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/sedan_no_bg_01_spec/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_a_class_stablenormal/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/white_van_stablenormal/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/yellow_van_stablenormal/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/radu_mercedes/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/matthias_vw/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_rerun/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/envgs_sedan_50/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_silver/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mitsubishi_totaled_rerun/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_rain/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/hyundai_white/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_1/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/mercedes_orbit_2/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/audi_nbg/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/bmw_nbg/latest.pt")
-    # pcd, env = load_splats("/home/roman/ba/envgs/data/trained_model/renault_white_rain/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/matthias_vw_metric3d_fixed_50/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/red_vw_envgs_synth_model_conf/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/sedan_no_sh_01_init_specular/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/envgs_sedan_no_bg/latest.pt")
+    pcd, env = load_splats("/mnt/e/BA/results/data_part2/trained_model/envgs_sedan_mast3r/latest.pt")
+    # pcd, env = load_splats("/mnt/e/BA/results/data_part2/trained_model/radu_mercedes/latest.pt")
+    # pcd, env = load_splats("/mnt/e/BA/results/data/trained_model/white_vanstablenormal_colmap_baseline/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/sedan_no_bg_01_spec/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/mercedes_a_class_stablenormal/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/white_van_stablenormal/latest.pt")
+    # pcd, env = load_splats("/mnt/e/BA/results/data_part2/trained_model/yellow_van_stablenormal/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/radu_mercedes/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/matthias_vw/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/envgs_sedan/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/envgs_sedan_rerun/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/envgs_sedan_50/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/audi_silver/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/mitsubishi_totaled_rerun/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/bmw_rain/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/hyundai_white/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/mercedes_orbit_1/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/mercedes_orbit_2/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/audi_nbg/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/bmw_nbg/latest.pt")
+    # pcd, env = load_splats("/mnt/e/ba/results/data_part2/trained_model/renault_white_rain/latest.pt")
 
     # Observation: 
     #
@@ -621,23 +761,43 @@ def main():
     # Initialize a viser server and our viewer.
     server = viser.ViserServer(verbose=True)
 
+    # State
+    groundplane_mesh = None
+
+
     # GUI
     with server.gui.add_folder("Splat Stats"):
         base_splats_rendered = server.gui.add_number("Base splats rendered", initial_value=0, min=0, step=1, disabled=True)
         env_splats_total = server.gui.add_number("Env splats total", initial_value=0, min=0, step=1, disabled=True)
 
     with server.gui.add_folder("Camera Origin"):
-        rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 116.0)
+        rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 0.0)
         rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0)
         rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0)
         off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0)
-        off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 1.0)
-        off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 1.0)
-    
+        off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 0.0)
+        off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 0.0)
+
+    #TODO: make plane fitting fill up a field called scene center, this will also be used to bake
+    with server.gui.add_folder("Fit a Plane"):
+        distance_threshold = server.gui.add_slider("Distance threshold", 0, 0.3, 0.005, 0.03)
+        fit_plane = server.gui.add_button("Fit ground plane")
+        show_groundplane = server.gui.add_checkbox("Render plane", initial_value=False)
+        apply_groundplane_transform = server.gui.add_checkbox("Apply groundplane transform", initial_value=True)
+
+    with server.gui.add_folder("Bake into 360 view", expand_by_default=True):
+        res_w = server.gui.add_number("Width:", initial_value=1980)
+        res_h = server.gui.add_number("Height:", initial_value=1080)
+
+        radial_resolution_deg = server.gui.add_slider("Radial resolution", min=0.0, max=360.0, step=0.5, initial_value=5)
+        radius = server.gui.add_slider("Radius", min=0.0, max=30, step=0.1, initial_value=3)
+        preview_bake = server.gui.add_checkbox("preview", initial_value=False)
+        submit_bake = server.gui.add_button("Bake")
+
     with server.gui.add_folder("Splat Controls"):
-        aabb_x = server.gui.add_multi_slider("AABB X", -50, 50, 0.1, (-2.5, 2.5))
-        aabb_y = server.gui.add_multi_slider("AABB Y", -50, 50, 0.1, (-2.5, 2.5))
-        aabb_z = server.gui.add_multi_slider("AABB Z", -50, 50, 0.1, (-2.5, 2.5))
+        aabb_x = server.gui.add_multi_slider("AABB X", -10, 10, 0.1, (-2.5, 2.5))
+        aabb_y = server.gui.add_multi_slider("AABB Y", -10, 10, 0.1, (-2.5, 2.5))
+        aabb_z = server.gui.add_multi_slider("AABB Z", -10, 10, 0.1, (-2.5, 2.5))
         render_pass = server.gui.add_dropdown("Render Pass", [render_pass.name for render_pass in RenderPass], initial_value=RenderPass.COMBINED.name)
         sh_toggle = server.gui.add_checkbox("Disable SH", initial_value=False)
         stripped_env = server.gui.add_checkbox("Enable stripes", initial_value=False)
@@ -666,6 +826,10 @@ def main():
         origin_offset = (off_x.value, off_y.value, off_z.value)
 
         c2w = apply_origin_transform(c2w, rot_xyz, origin_offset)
+
+        if apply_groundplane_transform.value and pcd.groundplane_transform is not None:
+            model_from_aligned = np.linalg.inv(pcd.groundplane_transform)
+            c2w = model_from_aligned @ c2w
 
         cam = get_render_inputs(width, height, c2w, K)
         img = render_frame(pcd, env, cam, RenderPass[render_pass.value], render_stripped_env_only=stripped_env.value, stripes_freq=stripped_env_freq.value)
@@ -698,9 +862,71 @@ def main():
             pcd.toggle_sh()
         viewer.rerender(_)
 
+    def fit_ground_plane(_=None):
+        plane_model = pcd.fit_plane(distance_threshold.value)
+
+        a, b, c, d = plane_model
+        n = np.array([a, b, c], dtype=np.float64)
+
+        scale = np.linalg.norm(n)
+        n = n / scale
+        d = d / scale
+
+        up = np.array((0.0, 0.0, 1.0))
+
+        #TODO: use plane SDF to isolate the car from the ground, calculate centroid on the selection, maybe select the biggest blob, to discard floaters
+        center = pcd.get_centroid.detach().cpu().numpy()
+        
+        # make sure plane normal is not flipped
+        if np.dot(center, n) + d < 0.0:
+            n = -n
+            d = -d
+
+        point = -d * n
+
+        pcd.groundplane = n, point
+        R = get_rotation_between(n, up)
+        level_transform = np.eye(4)
+        level_transform[:3, :3] = R
+        level_transform[:3, 3] = point - R @ point
+
+        aligned_center = level_transform[:3, :3] @ center + level_transform[:3, 3]
+        aligned_ground = level_transform[:3, :3] @ point + level_transform[:3, 3]
+        offset_transform = np.eye(4)
+        offset_transform[:3, 3] = (-aligned_center[0], -aligned_center[1], -aligned_ground[2])  # Translate to centroid x,y keep z at plane level
+
+        pcd.groundplane_transform = offset_transform @ level_transform
+        apply_groundplane_transform.value = True
+        render_plane()
+        viewer.rerender(_)
+
+
+    def render_plane(_=None):
+        nonlocal groundplane_mesh
+        if groundplane_mesh is not None:
+            groundplane_mesh.visible = False
+
+        if pcd.groundplane is None:
+            return
+
+        if show_groundplane.value:
+            n, point = pcd.groundplane
+            square_lenght = 10
+            points = get_square_from_plane(n, point, square_lenght)
+            faces = np.array([[0,1,2],[2,3,0]])
+
+            groundplane_mesh = server.scene.add_mesh_simple("ground_plane", points, faces, side="double", wireframe=True)
+
     aabb_x.on_update(_apply_aabb)
     aabb_y.on_update(_apply_aabb)
     aabb_z.on_update(_apply_aabb)
+
+    rot_x.on_update(lambda _: viewer.rerender(_))
+    rot_y.on_update(lambda _: viewer.rerender(_))
+    rot_z.on_update(lambda _: viewer.rerender(_))
+    off_x.on_update(lambda _: viewer.rerender(_))
+    off_y.on_update(lambda _: viewer.rerender(_))
+    off_z.on_update(lambda _: viewer.rerender(_))
 
     render_pass.on_update(lambda _: viewer.rerender(_))
     stripped_env.on_update(lambda _: viewer.rerender(_))
@@ -710,9 +936,108 @@ def main():
     # NerfView GUI overrides
     viewer._rendering_tab_handles["viewer_res_slider"].value = 1024
     viewer._rendering_folder.expand_by_default = False
+
+    fit_plane.on_click(lambda _: fit_ground_plane(_))
+    show_groundplane.on_update(lambda _: render_plane(_))
+    apply_groundplane_transform.on_update(lambda _: viewer.rerender(_))
+
+
+    # Find centroid, move everything to (x,y,z), get z from the ground plane
+    # Assume we are left with the ground and the car itself and maybe some background distractions or smth
+    # Look at a region of space near origin above a certain height, find the biggest clump of stuff, fit oriented bounding box, get axis with the larger span, rotate it to the x axis
+
+    # TODO: render a circle around the vehicle
+    # How to tell where the camera circle should be. We don't know where the car actually is
+    # UI: add a couple keyframes of the perspective you wanna do. Average the height coordinate. Fit an ellipse to the points, sample uniformly on the circle <- too complicated
+    # UI: view car from top, draw the bounding box, calculate centroid/median/middle of the box, add an offset parameter
+    # UI: assume the car is already centered. Add an offset parameter and height, visualize the trajectories
+
+    # Task: Visualize the trajectory
+
+    # from nerfview.render_panel import Keyframe, CameraPath
+    # k1 = Keyframe(position=np.array([4.61607104, 1.59025742, 1.77847391]), wxyz=np.array([-0.33297801,  0.4756751 ,  0.66698346, -0.46689604]), override_fov_enabled=False, override_fov_rad=0.8726646259971647, override_time_enabled=False, override_time_val=0.0, aspect=1.3333333333333333, override_transition_enabled=False, override_transition_sec=None)
+    # k2 = Keyframe(position=np.array([-1.87903655,  4.51072069,  1.7670938 ]), wxyz=np.array([ 0.11263064, -0.16049998,  0.80266957, -0.56327228]), override_fov_enabled=False, override_fov_rad=0.8726646259971647, override_time_enabled=False, override_time_val=0.0, aspect=1.3333333333333333, override_transition_enabled=False, override_transition_sec=None)
+    # camera_path = CameraPath(server, None, time_enabled = True)
+    # camera_path.default_transition_sec = 2.0
+    # camera_path.show_spline = True
+    # camera_path.add_camera(k1)
+    # camera_path.add_camera(k2)
+
+    # camera_path.update_spline()
+
+    def generate_circle_points(radius, radial_resolution_deg, center):
+        theta = np.arange(start=0.0, stop=2.0 * np.pi, step=radial_resolution_deg)
+        
+        points = center[None, :] + np.stack(
+            [
+                radius * np.cos(theta),
+                radius * np.sin(theta),
+                np.zeros_like(theta),
+            ],
+            axis=1,
+        )
+        return points
+
+    if preview_bake.value:
+        center = pcd.get_centroid.detach().cpu().numpy()
+
+        points = generate_circle_points(radius.value, radial_resolution_deg.value, center)
+
+        draw_camera_circle(server, points, center)
     
+    @submit_bake.on_click
+    def bake_360():
+        tmpdir = TemporaryDirectory(prefix="rayreflect")
+
+        output_folder = tmpdir
+        center = pcd.get_centroid.detach().cpu().numpy()
+
+        points = generate_circle_points(radius.value, radial_resolution_deg.value, center)
+        # construct c2ws to render
+        W = res_w.value
+        H = res_h.value
+        lookat = center
+
+        fx = fy = 1000  # rough guess, in pixels
+        cx = W / 2
+        cy = H / 2
+
+        # default cam intrinsics
+        K = np.array([
+            [fx, 0,  cx],
+            [0,  fy, cy],
+            [0,  0,  1]
+        ], dtype=np.float32)
+
+        for i, point in enumerate(points):            
+            
+            R = look_at(point, lookat)
+            T = point
+            cam_dict = make_camera_batch(
+                torch.tensor(H, dtype=torch.float32), 
+                torch.tensor(W, dtype=torch.float32), 
+                torch.tensor(K, dtype=torch.float32), 
+                torch.tensor(R, dtype=torch.float32), 
+                torch.tensor(T, dtype=torch.float32), 
+            )
+            img = render_frame(pcd, env, cam_dict, RenderPass.COMBINED)
+
+            path = Path(output_folder) / str(i)
+            cv2.imwrite(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), path.with_suffix(".png"))
+
+        # zip up the dir, load bytes
+        # upload it to the client
+        tmpdir.cleanup()
+        # pass in wxyz to visualize cameras or leave the center
+
+        # wxyz = look_at_wxyz(position, center)
+    
+    #look at centroid
+
+
     # Apply AABB from the start
-    # _apply_aabb()
+    _apply_aabb()
+    fit_ground_plane()
 
     while True:
         time.sleep(1.0)
