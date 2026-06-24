@@ -17,7 +17,8 @@ import viser
 import nerfview
 import time
 from tempfile import TemporaryDirectory
-import gzip
+import zipfile
+from io import BytesIO
 
 # Profile python: sudo py-spy top --pid {PID}
 #
@@ -431,6 +432,23 @@ def getProjectionMatrix(fovx: torch.Tensor, fovy: torch.Tensor, znear: torch.Ten
 
     return P
 
+def construct_cam_intri(w,h,fov=90):
+    fov_x = np.deg2rad(fov)
+
+
+    fx = (w / 2) / np.tan(fov_x / 2)
+    fy = fx  # square pixels
+
+    cx = w / 2
+    cy = h / 2
+
+    K = np.array([
+        [fx, 0,  cx],
+        [0,  fy, cy],
+        [0,  0,  1]
+    ], dtype=np.float32)
+
+    return K
 def apply_origin_transform(
     c2w: np.ndarray,
     rot_xyz_deg: tuple[float, float, float],
@@ -477,17 +495,13 @@ def look_at(position, target, world_up=np.array([0.0, 0.0, 1.0])):
 def draw_camera_circle(
     server: viser.ViserServer,
     points,
-    center,
+    lookat,
     fov_rad=np.deg2rad(50.0),
     aspect=16.0 / 9.0,
     name="/circle_orbit",
 ):
-
-
-    # Simplest exact circle overlay: line segments between consecutive samples.
-    # segments = np.stack([points, np.roll(points, -1, axis=0)], axis=1)
-
-    server.scene.add_spline_catmull_rom(
+    handles = []
+    handles.append(server.scene.add_spline_catmull_rom(
         f"{name}/ring",
         points=points,
         color=(220, 220, 220),
@@ -495,21 +509,22 @@ def draw_camera_circle(
         line_width=2.0,
         tension=0.5,
         segments=128,
-    )
+    ))
 
     # Optional sample markers.
-    server.scene.add_point_cloud(
+    handles.append(server.scene.add_point_cloud(
         f"{name}/samples",
         points=points,
         colors=np.tile(np.array([[255, 140, 0]], dtype=np.uint8), (len(points), 1)),
         point_size=0.05,
-    )
+    ))
+
 
     # One frustum per sampled camera pose/
     for i, position in enumerate(points):
-        R = look_at(position, center)
+        R = look_at(position, lookat)
         wxyz = viser.transforms.SO3.from_matrix(R).wxyz
-        server.scene.add_camera_frustum(
+        handles.append(server.scene.add_camera_frustum(
             f"{name}/cam_{i}",
             fov=fov_rad,
             aspect=aspect,
@@ -517,10 +532,10 @@ def draw_camera_circle(
             color=(200, 10, 30),
             wxyz=wxyz,
             position=position,
-        )
+        ))
         
 
-    return points
+    return handles
 
 def get_render_inputs(W, H, c2w, K):
     Rc = c2w[:3, :3]
@@ -763,6 +778,8 @@ def main():
 
     # State
     groundplane_mesh = None
+    camera_circle_handles = []
+
 
 
     # GUI
@@ -771,27 +788,26 @@ def main():
         env_splats_total = server.gui.add_number("Env splats total", initial_value=0, min=0, step=1, disabled=True)
 
     with server.gui.add_folder("Camera Origin"):
-        rot_x=server.gui.add_slider("Origin Rot X (deg)", -180.0, 180.0, 1.0, 0.0)
-        rot_y=server.gui.add_slider("Origin Rot Y (deg)", -180.0, 180.0, 1.0, 0.0)
-        rot_z=server.gui.add_slider("Origin Rot Z (deg)", -180.0, 180.0, 1.0, 0.0)
-        off_x=server.gui.add_slider("Origin X", -10.0, 10.0, 0.01, 0.0)
-        off_y=server.gui.add_slider("Origin Y", -10.0, 10.0, 0.01, 0.0)
-        off_z=server.gui.add_slider("Origin Z", -10.0, 10.0, 0.01, 0.0)
+        off_x=server.gui.add_slider("Origin X", -5.0, 5.0, 0.01, 0.0)
+        off_y=server.gui.add_slider("Origin Y", -5.0, 5.0, 0.01, 0.0)
+        off_z=server.gui.add_slider("Origin Z", -5.0, 5.0, 0.01, 0.0)
 
     #TODO: make plane fitting fill up a field called scene center, this will also be used to bake
     with server.gui.add_folder("Fit a Plane"):
         distance_threshold = server.gui.add_slider("Distance threshold", 0, 0.3, 0.005, 0.03)
-        fit_plane = server.gui.add_button("Fit ground plane")
         show_groundplane = server.gui.add_checkbox("Render plane", initial_value=False)
         apply_groundplane_transform = server.gui.add_checkbox("Apply groundplane transform", initial_value=True)
+        fit_plane = server.gui.add_button("Fit ground plane")
 
     with server.gui.add_folder("Bake into 360 view", expand_by_default=True):
         res_w = server.gui.add_number("Width:", initial_value=1980)
         res_h = server.gui.add_number("Height:", initial_value=1080)
 
-        radial_resolution_deg = server.gui.add_slider("Radial resolution", min=0.0, max=360.0, step=0.5, initial_value=5)
+        cam_height = server.gui.add_slider("Camera height", min=0, max=10, step=0.1, initial_value=2)
+        n_points = server.gui.add_slider("Num frames", min=1, max=100, step=1, initial_value=6)
         radius = server.gui.add_slider("Radius", min=0.0, max=30, step=0.1, initial_value=3)
-        preview_bake = server.gui.add_checkbox("preview", initial_value=False)
+        preview_bake = server.gui.add_checkbox("Preview", initial_value=False)
+        bake_progress = server.gui.add_progress_bar(0.0, visible=False)
         submit_bake = server.gui.add_button("Bake")
 
     with server.gui.add_folder("Splat Controls"):
@@ -821,15 +837,10 @@ def main():
         c2w = camera_state.c2w
         K = camera_state.get_K([width, height])
 
-        # Camera Origin Transform
-        rot_xyz = (rot_x.value, rot_y.value, rot_z.value)
-        origin_offset = (off_x.value, off_y.value, off_z.value)
+        model_matrix = get_full_transform()
+        model_from_aligned = np.linalg.inv(model_matrix)
 
-        c2w = apply_origin_transform(c2w, rot_xyz, origin_offset)
-
-        if apply_groundplane_transform.value and pcd.groundplane_transform is not None:
-            model_from_aligned = np.linalg.inv(pcd.groundplane_transform)
-            c2w = model_from_aligned @ c2w
+        c2w = model_from_aligned @ c2w
 
         cam = get_render_inputs(width, height, c2w, K)
         img = render_frame(pcd, env, cam, RenderPass[render_pass.value], render_stripped_env_only=stripped_env.value, stripes_freq=stripped_env_freq.value)
@@ -861,6 +872,15 @@ def main():
         with viewer.lock:
             pcd.toggle_sh()
         viewer.rerender(_)
+    
+    def get_full_transform():
+        offset_transform = np.eye(4)
+        offset_transform[:3, 3] = (-off_x.value, -off_y.value, -off_z.value)
+        model_matrix = offset_transform
+        if apply_groundplane_transform.value and pcd.groundplane_transform is not None:
+            model_matrix = offset_transform @ pcd.groundplane_transform
+        
+        return model_matrix
 
     def fit_ground_plane(_=None):
         plane_model = pcd.fit_plane(distance_threshold.value)
@@ -888,15 +908,22 @@ def main():
         R = get_rotation_between(n, up)
         level_transform = np.eye(4)
         level_transform[:3, :3] = R
-        level_transform[:3, 3] = point - R @ point
-
-        aligned_center = level_transform[:3, :3] @ center + level_transform[:3, 3]
-        aligned_ground = level_transform[:3, :3] @ point + level_transform[:3, 3]
-        offset_transform = np.eye(4)
-        offset_transform[:3, 3] = (-aligned_center[0], -aligned_center[1], -aligned_ground[2])  # Translate to centroid x,y keep z at plane level
-
-        pcd.groundplane_transform = offset_transform @ level_transform
+        level_transform[:3, 3] = point - R @ point # rotate around point
+        
+        pcd.groundplane_transform = level_transform
         apply_groundplane_transform.value = True
+
+        # treat the center as centroid x,y and z of the plane
+        aligned_center = level_transform @ np.append(center, 1.0)
+        aligned_ground = level_transform @ np.append(point, 1.0)
+        # aligned_center = level_transform[:3, :3] @ center + level_transform[:3, 3]
+        # aligned_ground = level_transform[:3, :3] @ point + level_transform[:3, 3]
+
+        off_x.value = aligned_center[0]
+        off_y.value = aligned_center[1]
+        off_z.value = aligned_ground[2]
+
+
         render_plane()
         viewer.rerender(_)
 
@@ -921,9 +948,6 @@ def main():
     aabb_y.on_update(_apply_aabb)
     aabb_z.on_update(_apply_aabb)
 
-    rot_x.on_update(lambda _: viewer.rerender(_))
-    rot_y.on_update(lambda _: viewer.rerender(_))
-    rot_z.on_update(lambda _: viewer.rerender(_))
     off_x.on_update(lambda _: viewer.rerender(_))
     off_y.on_update(lambda _: viewer.rerender(_))
     off_z.on_update(lambda _: viewer.rerender(_))
@@ -941,7 +965,6 @@ def main():
     show_groundplane.on_update(lambda _: render_plane(_))
     apply_groundplane_transform.on_update(lambda _: viewer.rerender(_))
 
-
     # Find centroid, move everything to (x,y,z), get z from the ground plane
     # Assume we are left with the ground and the car itself and maybe some background distractions or smth
     # Look at a region of space near origin above a certain height, find the biggest clump of stuff, fit oriented bounding box, get axis with the larger span, rotate it to the x axis
@@ -952,21 +975,18 @@ def main():
     # UI: view car from top, draw the bounding box, calculate centroid/median/middle of the box, add an offset parameter
     # UI: assume the car is already centered. Add an offset parameter and height, visualize the trajectories
 
-    # Task: Visualize the trajectory
+    #TODO: find the bug where the black areas become the specular pass
 
-    # from nerfview.render_panel import Keyframe, CameraPath
-    # k1 = Keyframe(position=np.array([4.61607104, 1.59025742, 1.77847391]), wxyz=np.array([-0.33297801,  0.4756751 ,  0.66698346, -0.46689604]), override_fov_enabled=False, override_fov_rad=0.8726646259971647, override_time_enabled=False, override_time_val=0.0, aspect=1.3333333333333333, override_transition_enabled=False, override_transition_sec=None)
-    # k2 = Keyframe(position=np.array([-1.87903655,  4.51072069,  1.7670938 ]), wxyz=np.array([ 0.11263064, -0.16049998,  0.80266957, -0.56327228]), override_fov_enabled=False, override_fov_rad=0.8726646259971647, override_time_enabled=False, override_time_val=0.0, aspect=1.3333333333333333, override_transition_enabled=False, override_transition_sec=None)
-    # camera_path = CameraPath(server, None, time_enabled = True)
-    # camera_path.default_transition_sec = 2.0
-    # camera_path.show_spline = True
-    # camera_path.add_camera(k1)
-    # camera_path.add_camera(k2)
 
-    # camera_path.update_spline()
+    def clear_camera_circle(camera_circle_handles):
+        for handle in camera_circle_handles:
+            handle.remove()
+        camera_circle_handles = []
 
-    def generate_circle_points(radius, radial_resolution_deg, center):
-        theta = np.arange(start=0.0, stop=2.0 * np.pi, step=radial_resolution_deg)
+    def generate_circle_points(radius, num_points, center):
+        # theta = np.arange(start=0.0, stop=2.0 * np.pi, step=np.radians(radial_resolution_deg))
+        theta = np.linspace(start=0.0, stop=2.0 * np.pi, num=int(num_points), endpoint=True)
+        # linspace is better, uniform sampling, not fixed distance sampling
         
         points = center[None, :] + np.stack(
             [
@@ -978,55 +998,77 @@ def main():
         )
         return points
 
-    if preview_bake.value:
-        center = pcd.get_centroid.detach().cpu().numpy()
+    @cam_height.on_update
+    @radius.on_update
+    @n_points.on_update
+    @preview_bake.on_update
+    def _(_):
+        nonlocal camera_circle_handles
+        clear_camera_circle(camera_circle_handles)
+        if not preview_bake.value: return
+        # ground_center = pcd.get_centroid.detach().cpu().numpy()
+        ground_center = np.array([0, 0, 0])
+        camera_center = np.array([0, 0, cam_height.value])  # viser world space
 
-        points = generate_circle_points(radius.value, radial_resolution_deg.value, center)
-
-        draw_camera_circle(server, points, center)
+        points = generate_circle_points(radius.value, n_points.value, camera_center)
+        camera_circle_handles = draw_camera_circle(server, points, lookat=ground_center)
+        #TODO: look at centroid x,y, plane z
+        #Calculate circle using centroid x,y and a different height
+        
     
     @submit_bake.on_click
-    def bake_360():
+    def _(event):
         tmpdir = TemporaryDirectory(prefix="rayreflect")
 
-        output_folder = tmpdir
-        center = pcd.get_centroid.detach().cpu().numpy()
+        output_folder = tmpdir.name
+        ground_center = np.array([0, 0, 0])
+        camera_center = np.array([0, 0, cam_height.value])  # viser world space
 
-        points = generate_circle_points(radius.value, radial_resolution_deg.value, center)
+        points = generate_circle_points(radius.value, n_points.value, camera_center)
         # construct c2ws to render
-        W = res_w.value
-        H = res_h.value
-        lookat = center
+        w = res_w.value
+        h = res_h.value
 
-        fx = fy = 1000  # rough guess, in pixels
-        cx = W / 2
-        cy = H / 2
-
-        # default cam intrinsics
-        K = np.array([
-            [fx, 0,  cx],
-            [0,  fy, cy],
-            [0,  0,  1]
-        ], dtype=np.float32)
-
-        for i, point in enumerate(points):            
-            
-            R = look_at(point, lookat)
-            T = point
-            cam_dict = make_camera_batch(
-                torch.tensor(H, dtype=torch.float32), 
-                torch.tensor(W, dtype=torch.float32), 
-                torch.tensor(K, dtype=torch.float32), 
-                torch.tensor(R, dtype=torch.float32), 
-                torch.tensor(T, dtype=torch.float32), 
-            )
-            img = render_frame(pcd, env, cam_dict, RenderPass.COMBINED)
-
-            path = Path(output_folder) / str(i)
-            cv2.imwrite(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), path.with_suffix(".png"))
+        K = construct_cam_intri(w, h, fov=90)
 
         # zip up the dir, load bytes
+        buffer = BytesIO()
+
+        zip_file = zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED)
+        bake_progress.visible = True
+        progressbar_inc = 100 / len(points)
+        
+        with viewer.lock:
+            for i, circle_point in enumerate(points):                
+                cam_rot = look_at(circle_point, ground_center)
+                cam_t = circle_point
+                
+                camera_transform = np.eye(4)
+                camera_transform[:3,:3] = cam_rot
+                camera_transform[:3,3] = cam_t
+                
+                model_matrix = get_full_transform()
+
+                render_transform = np.linalg.inv(model_matrix) @ camera_transform
+
+                cam = get_render_inputs(w, h, render_transform, K)
+                img = render_frame(pcd, env, cam, RenderPass.COMBINED)
+
+                path = Path(output_folder) / str(i)
+                im_path = path.with_suffix(".png")
+                cv2.imwrite(str(im_path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                
+                zip_file.write(str(im_path), arcname=im_path.name)
+                bake_progress.value += progressbar_inc
+
+        #TODO: add plane transform and ui transform
+        zip_file.close()
         # upload it to the client
+        event.client.send_file_download(
+            filename="rayreflect_360.zip",
+            content=buffer.getvalue(),
+            save_immediately=True,  # False => show a download link notification
+        )
         tmpdir.cleanup()
         # pass in wxyz to visualize cameras or leave the center
 
